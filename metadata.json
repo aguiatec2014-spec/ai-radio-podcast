@@ -1,0 +1,6 @@
+{
+  "name": "AI Radio Studio",
+  "description": "Rádio/Podcast automatizado que coleta notícias via RSS, gera roteiro com Gemini e converte para áudio usando TTS.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
