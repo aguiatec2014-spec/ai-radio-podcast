@@ -19,10 +19,13 @@ export default function App() {
   const [savedSources, setSavedSources] = useState<string[]>([
     'https://g1.globo.com/rss/g1/',
     'https://ccm.artesp.sp.gov.br/rodovias/ocorrencias',
+    'https://news.google.com/rss/search?q=mudan%C3%A7as+clim%C3%A1ticas+brasil&hl=pt-BR&gl=BR&ceid=BR:pt-419',
     'https://news.google.com.br'
   ]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [episodes, setEpisodes] = useState<Episode[]>([]);
+  const [showQuotaPopup, setShowQuotaPopup] = useState(false);
+  const [episodesGenerated, setEpisodesGenerated] = useState(0);
   
   // Continuous player state
   const [currentPlayingIndex, setCurrentPlayingIndex] = useState<number | null>(null);
@@ -43,6 +46,108 @@ export default function App() {
     }
   };
 
+  const playSyntheticTransition = (type: 'in' | 'out' | 'time-in' | 'time-out') => {
+    try {
+      const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+      const ctx = new AudioContext();
+
+      if (type === 'in') {
+        // Modern News Ping (Clean, authoritative double chime)
+        const osc1 = ctx.createOscillator();
+        const osc2 = ctx.createOscillator();
+        const gain = ctx.createGain();
+
+        osc1.type = 'sine';
+        osc2.type = 'sine';
+
+        osc1.frequency.setValueAtTime(880, ctx.currentTime);
+        osc1.frequency.exponentialRampToValueAtTime(440, ctx.currentTime + 0.1);
+        
+        osc2.frequency.setValueAtTime(1318.51, ctx.currentTime);
+        osc2.frequency.exponentialRampToValueAtTime(659.25, ctx.currentTime + 0.15);
+
+        gain.gain.setValueAtTime(0, ctx.currentTime);
+        gain.gain.linearRampToValueAtTime(0.15, ctx.currentTime + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.7);
+
+        osc1.connect(gain);
+        osc2.connect(gain);
+        gain.connect(ctx.destination);
+
+        osc1.start(ctx.currentTime);
+        osc2.start(ctx.currentTime);
+        osc1.stop(ctx.currentTime + 0.8);
+        osc2.stop(ctx.currentTime + 0.8);
+
+      } else if (type === 'out') {
+        // Modern Low Thud/Swoosh
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(150, ctx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(40, ctx.currentTime + 0.3);
+
+        gain.gain.setValueAtTime(0, ctx.currentTime);
+        gain.gain.linearRampToValueAtTime(0.2, ctx.currentTime + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
+
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + 0.5);
+
+      } else if (type === 'time-in' || type === 'time-out') {
+        // Mechanical Tick-Tock Sequence
+        const createClick = (freq: number, time: number) => {
+           const osc = ctx.createOscillator();
+           const gain = ctx.createGain();
+           
+           osc.type = 'square';
+           osc.frequency.setValueAtTime(freq, time);
+           
+           gain.gain.setValueAtTime(0, time);
+           gain.gain.linearRampToValueAtTime(0.1, time + 0.002);
+           gain.gain.exponentialRampToValueAtTime(0.001, time + 0.03);
+
+           osc.connect(gain);
+           gain.connect(ctx.destination);
+           osc.start(time);
+           osc.stop(time + 0.05);
+        };
+
+        const now = ctx.currentTime;
+        createClick(1200, now);           // tick
+        createClick(800, now + 0.5);      // tock
+        if (type === 'time-in') {
+          createClick(1200, now + 1.0);   // tick
+        }
+      }
+    } catch (e) {
+      console.error("Audio Context not supported", e);
+    }
+  };
+
+  const generateTimeAnnouncement = async () => {
+    try {
+      const now = new Date();
+      const timeString = `${now.getHours()} horas e ${now.getMinutes()} minutos`;
+      const res = await fetch('/api/generate-time', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ timeString })
+      });
+      const data = await res.json();
+      if (res.ok && !data.error) {
+        setEpisodes(prev => [data, ...prev]);
+        setCurrentPlayingIndex(curr => curr !== null ? curr + 1 : 0);
+      }
+    } catch (err) {
+      console.error("Erro ao gerar anuncio de hora:", err);
+    }
+  };
+
   const handleAddSource = () => {
     if (rssUrl && !savedSources.includes(rssUrl)) {
       setSavedSources([...savedSources, rssUrl]);
@@ -57,6 +162,7 @@ export default function App() {
   const handleAutoGenerateAll = async () => {
     if (savedSources.length === 0) return;
     setIsGenerating(true);
+    let genCount = episodesGenerated;
     try {
       for (const sourceUrl of savedSources) {
         const res = await fetch('/api/generate-episode', {
@@ -68,10 +174,19 @@ export default function App() {
         if (res.ok && !data.error) {
           setEpisodes(prev => [data, ...prev]);
           setCurrentPlayingIndex(curr => curr !== null ? curr + 1 : 0);
+          
+          genCount++;
+          if (genCount % 3 === 0) {
+            await generateTimeAnnouncement();
+          }
         } else {
-          console.error(`Erro ao gerar de ${sourceUrl}:`, data.error || "Falha desconhecida");
+          if (data.error === "QUOTA_EXCEEDED") {
+            setShowQuotaPopup(true);
+            break; 
+          }
         }
       }
+      setEpisodesGenerated(genCount);
     } catch (err) {
       console.error(err);
       alert("Falha na geração em lote.");
@@ -82,7 +197,7 @@ export default function App() {
 
   const handleGenerate = async () => {
     if (!rssUrl) return;
-    handleAddSource(); // auto save when generating
+    handleAddSource();
     setIsGenerating(true);
     try {
       const res = await fetch('/api/generate-episode', {
@@ -94,8 +209,18 @@ export default function App() {
       if (res.ok && !data.error) {
         setEpisodes(prev => [data, ...prev]);
         setCurrentPlayingIndex(curr => curr !== null ? curr + 1 : 0);
+        
+        const newCount = episodesGenerated + 1;
+        setEpisodesGenerated(newCount);
+        if (newCount % 3 === 0) {
+          await generateTimeAnnouncement();
+        }
       } else {
-        alert("Erro: " + (data.error || "Falha desconhecida"));
+        if (data.error === "QUOTA_EXCEEDED") {
+          setShowQuotaPopup(true);
+        } else {
+          alert("Erro: " + (data.error || "Falha desconhecida"));
+        }
       }
     } catch (err) {
       console.error(err);
@@ -108,8 +233,18 @@ export default function App() {
   // Player controls
   useEffect(() => {
     if (currentPlayingIndex !== null && audioRef.current) {
-      audioRef.current.play().catch(e => console.error("Audio play failed:", e));
-      setIsPlaying(true);
+      const currentEpisode = episodes[currentPlayingIndex];
+      const isTime = currentEpisode?.title?.includes("Hora Certa");
+      
+      playSyntheticTransition(isTime ? 'time-in' : 'in');
+      
+      // Delay to let transition play
+      setTimeout(() => {
+         if (audioRef.current) {
+            audioRef.current.play().catch(e => console.error("Audio play failed:", e));
+            setIsPlaying(true);
+         }
+      }, isTime ? 1200 : 600);
     }
   }, [currentPlayingIndex]);
 
@@ -124,13 +259,20 @@ export default function App() {
   };
 
   const handleAudioEnded = () => {
+    const currentEpisode = currentPlayingIndex !== null ? episodes[currentPlayingIndex] : null;
+    const isTime = currentEpisode?.title?.includes("Hora Certa");
+    
+    playSyntheticTransition(isTime ? 'time-out' : 'out');
+    
     // Play next episode in the list (older episodes since index 0 is newest)
-    if (currentPlayingIndex !== null && currentPlayingIndex < episodes.length - 1) {
-      setCurrentPlayingIndex(currentPlayingIndex + 1);
-    } else {
-      setIsPlaying(false);
-      setCurrentPlayingIndex(null);
-    }
+    setTimeout(() => {
+      if (currentPlayingIndex !== null && currentPlayingIndex < episodes.length - 1) {
+        setCurrentPlayingIndex(currentPlayingIndex + 1);
+      } else {
+        setIsPlaying(false);
+        setCurrentPlayingIndex(null);
+      }
+    }, isTime ? 700 : 500);
   };
 
   const playEpisode = (index: number) => {
@@ -140,32 +282,32 @@ export default function App() {
   const currentEpisode = currentPlayingIndex !== null ? episodes[currentPlayingIndex] : null;
 
   return (
-    <div className="min-h-screen bg-neutral-50 text-neutral-900 font-sans pb-32">
-      <div className="max-w-5xl mx-auto p-6 md:p-12 space-y-12">
+    <div className="min-h-screen bg-neutral-50 text-neutral-900 font-sans pb-28">
+      <div className="w-full max-w-7xl mx-auto px-2 sm:px-4 md:px-6 py-3 space-y-4">
         
         {/* Header */}
-        <header className="flex flex-col md:flex-row md:items-center justify-between gap-6 border-b border-neutral-200 pb-8">
-          <div className="flex items-center gap-4">
-            <div className="w-12 h-12 bg-neutral-900 text-white rounded-2xl flex items-center justify-center shadow-lg">
-              <Radio className="w-6 h-6" />
+        <header className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-neutral-200 pb-3">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-neutral-900 text-white rounded-xl flex items-center justify-center shadow-md">
+              <Radio className="w-5 h-5" />
             </div>
             <div>
-              <h1 className="text-2xl font-bold tracking-tight">AI Radio Studio</h1>
-              <p className="text-neutral-500">Automação de Podcast & Rádio ao Vivo</p>
+              <h1 className="text-xl sm:text-2xl font-bold tracking-tight">AI Radio Studio</h1>
+              <p className="text-xs sm:text-sm text-neutral-500">Automação de Podcast & Rádio ao Vivo</p>
             </div>
           </div>
           <a 
             href="/feed.xml" 
             target="_blank" 
             rel="noopener noreferrer"
-            className="flex items-center gap-2 px-4 py-2 bg-orange-100 text-orange-700 font-medium rounded-lg hover:bg-orange-200 transition-colors shadow-sm"
+            className="self-start sm:self-auto flex items-center gap-2 px-3.5 py-1.5 bg-orange-100 text-orange-700 text-sm font-medium rounded-lg hover:bg-orange-200 transition-colors shadow-sm"
           >
             <Rss className="w-4 h-4" />
             <span>Feed do Podcast (XML)</span>
           </a>
         </header>
 
-        <main className="grid grid-cols-1 md:grid-cols-12 gap-8">
+        <main className="grid grid-cols-1 md:grid-cols-12 gap-4 md:gap-6">
           
           {/* Dashboard Left Column */}
           <div className="md:col-span-5 space-y-6">
@@ -345,8 +487,8 @@ export default function App() {
 
       {/* Floating Player UI */}
       {currentEpisode && (
-        <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-neutral-200 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)] p-4 transform transition-transform">
-          <div className="max-w-5xl mx-auto flex items-center justify-between gap-4">
+        <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-neutral-200 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)] p-3 sm:p-4 transform transition-transform">
+          <div className="max-w-7xl mx-auto px-2 sm:px-4 md:px-6 flex items-center justify-between gap-4">
             <div className="flex items-center gap-4 min-w-0 flex-1">
               <div className="w-12 h-12 bg-neutral-100 rounded-lg flex items-center justify-center flex-shrink-0">
                 <Radio className="w-6 h-6 text-neutral-400" />
@@ -370,6 +512,29 @@ export default function App() {
                 title="Pular para o próximo"
               >
                 <SkipForward className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Quota Exceeded Popup */}
+      {showQuotaPopup && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6 animate-in fade-in zoom-in duration-200">
+            <div className="w-12 h-12 bg-red-100 text-red-600 rounded-full flex items-center justify-center mb-4">
+              <Zap className="w-6 h-6" />
+            </div>
+            <h3 className="text-xl font-bold text-neutral-900 mb-2">Limite da API Excedido</h3>
+            <p className="text-neutral-600 mb-6 leading-relaxed">
+              Você atingiu o limite gratuito de requisições da API do Google Gemini. Aguarde alguns minutos antes de tentar gerar novos episódios ou atualize seu plano na plataforma do Google AI Studio.
+            </p>
+            <div className="flex justify-end">
+              <button 
+                onClick={() => setShowQuotaPopup(false)}
+                className="px-5 py-2.5 bg-neutral-900 text-white font-medium rounded-lg hover:bg-neutral-800 transition-colors"
+              >
+                Entendi
               </button>
             </div>
           </div>

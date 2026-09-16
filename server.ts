@@ -65,6 +65,30 @@ function writeWavHeader(buffer: Buffer, sampleRate: number = 24000) {
   buffer.writeUInt32LE(buffer.length - 44, 40);
 }
 
+// Helper to retry Gemini API calls in case of 503 or transient errors
+async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
+  let attempt = 0;
+  while (attempt < maxRetries) {
+    try {
+      return await fn();
+    } catch (error: any) {
+      attempt++;
+      console.warn(`[Retry] Attempt ${attempt} falhou: ${error.message}`);
+      
+      const errorMessage = error.message?.toLowerCase() || '';
+      if (errorMessage.includes('429') || errorMessage.includes('quota') || errorMessage.includes('exhausted')) {
+        error.isQuotaError = true;
+        throw error;
+      }
+      
+      if (attempt >= maxRetries) throw error;
+      // Espera antes de tentar novamente (1.5s, 3s)
+      await new Promise(resolve => setTimeout(resolve, 1500 * attempt));
+    }
+  }
+  throw new Error("Inalcançável");
+}
+
 // Custom scraping function for ARTESP
 async function fetchArtespScraping(url: string) {
   try {
@@ -126,6 +150,105 @@ app.get('/api/episodes', (req, res) => {
   res.json(episodes);
 });
 
+app.post('/api/generate-time', async (req, res) => {
+  try {
+    const { timeString } = req.body;
+    if (!timeString) {
+      return res.status(400).json({ error: "timeString is required" });
+    }
+
+    const textPart1 = `São ${timeString}...`;
+    const textPart2 = `repita...`;
+    const textPart3 = `${timeString}.`;
+
+    // 1. Male voice
+    const tts1 = await withRetry(() => ai.models.generateContent({
+      model: "gemini-3.1-flash-tts-preview",
+      contents: [{ parts: [{ text: textPart1 }] }],
+      config: {
+        responseModalities: [Modality.AUDIO],
+        speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Charon' } }, // Male
+        },
+      },
+    }));
+
+    // 2. Female voice
+    const tts2 = await withRetry(() => ai.models.generateContent({
+      model: "gemini-3.1-flash-tts-preview",
+      contents: [{ parts: [{ text: textPart2 }] }],
+      config: {
+        responseModalities: [Modality.AUDIO],
+        speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Aoede' } }, // Female
+        },
+      },
+    }));
+
+    // 3. Male voice again
+    const tts3 = await withRetry(() => ai.models.generateContent({
+      model: "gemini-3.1-flash-tts-preview",
+      contents: [{ parts: [{ text: textPart3 }] }],
+      config: {
+        responseModalities: [Modality.AUDIO],
+        speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Charon' } }, // Male
+        },
+      },
+    }));
+
+    const b64_1 = tts1.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    const b64_2 = tts2.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    const b64_3 = tts3.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+
+    if (!b64_1 || !b64_2 || !b64_3) {
+      throw new Error("Falha ao gerar um dos trechos de áudio da hora");
+    }
+
+    const pcm1 = Buffer.from(b64_1, 'base64');
+    const pcm2 = Buffer.from(b64_2, 'base64');
+    const pcm3 = Buffer.from(b64_3, 'base64');
+
+    const totalPcmLength = pcm1.length + pcm2.length + pcm3.length;
+    const wavBuffer = Buffer.alloc(44 + totalPcmLength);
+    
+    writeWavHeader(wavBuffer, 24000);
+    
+    // Concatenate PCM data
+    let offset = 44;
+    pcm1.copy(wavBuffer, offset);
+    offset += pcm1.length;
+    pcm2.copy(wavBuffer, offset);
+    offset += pcm2.length;
+    pcm3.copy(wavBuffer, offset);
+
+    const episodeId = uuidv4();
+    const fileName = `time-${episodeId}.wav`;
+    const publicDir = path.join(process.cwd(), 'public', 'audio');
+    
+    if (!fs.existsSync(publicDir)) {
+      fs.mkdirSync(publicDir, { recursive: true });
+    }
+    
+    fs.writeFileSync(path.join(publicDir, fileName), wavBuffer);
+
+    // Save as a special episode
+    const newEpisode: Episode = {
+      id: episodeId,
+      title: `Hora Certa: ${timeString}`,
+      description: "Anúncio especial de hora",
+      audioUrl: `/audio/${fileName}`,
+      date: new Date().toUTCString(),
+    };
+
+    episodes.unshift(newEpisode); // add to top
+    res.json(newEpisode);
+  } catch (error: any) {
+    console.error("Erro ao gerar hora:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.post('/api/generate-episode', async (req, res) => {
   const { rssUrl } = req.body;
   if (!rssUrl) {
@@ -141,20 +264,36 @@ app.post('/api/generate-episode', async (req, res) => {
       topItems = ocorrencias; // Get all occurrences without slicing
     } else if (rssUrl.includes("news.google")) {
       let targetUrl = rssUrl;
+      // If it's a raw google news URL without RSS, default to top news.
+      // But if it ALREADY has 'rss' (like the search url), use it as is!
       if (!targetUrl.includes("rss")) {
         targetUrl = "https://news.google.com/rss?hl=pt-BR&gl=BR&ceid=BR:pt-419";
       }
-      const feed = await parser.parseURL(targetUrl);
-      topItems = feed.items.map(item => {
-        // Google News titles often include the source like "Title - Source"
-        const titleParts = item.title?.split(' - ') || [];
-        const source = titleParts.length > 1 ? titleParts.pop() : 'Google News';
-        return {
-          title: titleParts.join(' - ') || item.title,
-          source: source,
-          date: item.pubDate
-        };
-      });
+      
+      // Google News is extremely aggressive in blocking bot requests (503/403) from cloud IPs.
+      // We directly use feed2json to safely parse it without hitting their WAF or API limits.
+      try {
+           const feed2jsonUrl = `https://feed2json.org/convert?url=${encodeURIComponent(targetUrl)}`;
+           const response = await fetch(feed2jsonUrl);
+           const data = await response.json();
+           
+           if (!data || !data.items) {
+              throw new Error("Feed2JSON failed to parse the RSS items.");
+           }
+           
+           topItems = data.items.map((item: any) => {
+              const titleParts = item.title?.split(' - ') || [];
+              const source = titleParts.length > 1 ? titleParts.pop() : 'Google News';
+              return {
+                  title: titleParts.join(' - ') || item.title,
+                  source: source,
+                  date: item.date_published
+              };
+           });
+      } catch (err: any) {
+           console.error("Feed2JSON proxy failed:", err);
+           throw new Error(`Serviço de leitura de notícias indisponível no momento (${err.message}). Tente novamente mais tarde.`);
+      }
     } else {
       const feed = await parser.parseURL(rssUrl);
       topItems = feed.items.map(item => ({
@@ -179,10 +318,10 @@ app.post('/api/generate-episode', async (req, res) => {
       ${JSON.stringify(topItems, null, 2)}
     `;
 
-    const scriptResponse = await ai.models.generateContent({
+    const scriptResponse = await withRetry(() => ai.models.generateContent({
       model: "gemini-3.8-flash",
       contents: scriptPrompt,
-    });
+    }));
     
     const scriptText = scriptResponse.text?.trim() || "";
 
@@ -212,7 +351,7 @@ app.post('/api/generate-episode', async (req, res) => {
     for (const chunk of chunks) {
        if (!chunk) continue;
        try {
-           const ttsResponse = await ai.models.generateContent({
+           const ttsResponse = await withRetry(() => ai.models.generateContent({
              model: "gemini-3.1-flash-tts-preview",
              contents: [{ parts: [{ text: chunk }] }],
              config: {
@@ -223,7 +362,7 @@ app.post('/api/generate-episode', async (req, res) => {
                    },
                },
              },
-           });
+           }));
 
            const base64Audio = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
            if (base64Audio) {
@@ -231,6 +370,9 @@ app.post('/api/generate-episode', async (req, res) => {
            }
        } catch (ttsErr: any) {
            console.error("Aviso: Falha ao gerar um bloco de TTS:", ttsErr.message);
+           if (ttsErr.isQuotaError) {
+             throw ttsErr;
+           }
        }
     }
 
@@ -260,9 +402,26 @@ app.post('/api/generate-episode', async (req, res) => {
     fs.writeFileSync(filePath, wavBuffer);
 
     const audioUrl = `/audio/${fileName}`;
+    
+    // Format the URL as the title
+    let formattedTitle = rssUrl
+        .replace(/^https?:\/\//i, '') // Remove http:// or https://
+        .replace(/^www\./i, '');      // Remove www.
+        
+    // Optionally crop long paths to keep it clean (like news.google.com)
+    if (formattedTitle.includes('/')) {
+        formattedTitle = formattedTitle.split('/')[0];
+    }
+    // If it was the Google News search string specifically, we can make it prettier:
+    if (rssUrl.includes('mudanças+climáticas')) {
+       formattedTitle = 'Google Notícias: Mudanças Climáticas';
+    } else if (rssUrl.includes('artesp')) {
+       formattedTitle = 'Artesp - Rodovias SP';
+    }
+
     const newEpisode: Episode = {
       id: episodeId,
-      title: `Episódio Especial: ${new Date().toLocaleDateString('pt-BR')}`,
+      title: formattedTitle,
       description: scriptText,
       audioUrl: audioUrl,
       date: new Date().toUTCString()
@@ -275,10 +434,16 @@ app.post('/api/generate-episode', async (req, res) => {
 
   } catch (error: any) {
     console.error("Error generating episode:", error);
+    
+    const isQuota = error.isQuotaError;
+    const errPayload = isQuota 
+        ? { error: "QUOTA_EXCEEDED", message: "Limite de saldo excedido na API do Gemini." }
+        : { error: error.message || "Unknown error" };
+
     if (!res.headersSent) {
-      res.status(500).json({ error: error.message || "Unknown error" });
+      res.status(isQuota ? 429 : 500).json(errPayload);
     } else {
-      res.write(JSON.stringify({ error: error.message || "Unknown error" }));
+      res.write(JSON.stringify(errPayload));
       res.end();
     }
   }
