@@ -4,7 +4,7 @@
  */
 
 import { useState, useEffect, useRef } from 'react';
-import { PlayCircle, Plus, Rss, Radio, Podcast, Loader2, Link2, ListPlus, Pause, SkipForward, Play, X, Zap } from 'lucide-react';
+import { PlayCircle, Plus, Rss, Radio, Podcast, Loader2, Link2, ListPlus, Pause, SkipForward, Play, X, Zap, Download, Share2 } from 'lucide-react';
 
 interface Episode {
   id: string;
@@ -279,6 +279,62 @@ export default function App() {
     setCurrentPlayingIndex(index);
   };
 
+  const handleDownload = async (ep: Episode, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    try {
+      const response = await fetch(ep.audioUrl);
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const safeTitle = ep.title.replace(/[/\\?%*:|"<>]/g, '-').trim() || 'audio-podcast';
+      a.download = `${safeTitle}.wav`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Erro ao baixar áudio:', err);
+      const a = document.createElement('a');
+      a.href = ep.audioUrl;
+      a.download = `${ep.title || 'podcast'}.wav`;
+      a.target = '_blank';
+      a.click();
+    }
+  };
+
+  const handleShareWhatsApp = async (ep: Episode, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    const safeTitle = ep.title.replace(/[/\\?%*:|"<>]/g, '-').trim() || 'audio-podcast';
+    const fullAudioUrl = new URL(ep.audioUrl, window.location.href).href;
+    const shareText = `🎙️ *${ep.title}*\nOuça este áudio gerado no AI Radio Studio:\n${fullAudioUrl}`;
+
+    // Baixa o arquivo automaticamente para garantir que o usuário o tenha em mãos
+    handleDownload(ep);
+
+    // Tenta compartilhar com arquivo via Web Share API se suportado (em smartphones abre diretamente o WhatsApp permitindo anexar o áudio)
+    try {
+      const response = await fetch(ep.audioUrl);
+      const blob = await response.blob();
+      const file = new File([blob], `${safeTitle}.wav`, { type: 'audio/wav' });
+
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({
+          title: ep.title,
+          text: shareText,
+          files: [file],
+        });
+        return;
+      }
+    } catch (err) {
+      console.log('Web Share não suportado ou cancelado, abrindo WhatsApp Web:', err);
+    }
+
+    // Fallback: abre o WhatsApp com a mensagem pré-definida e link
+    const whatsappUrl = `https://api.whatsapp.com/send?text=${encodeURIComponent(shareText)}`;
+    window.open(whatsappUrl, '_blank', 'noopener,noreferrer');
+  };
+
   const currentEpisode = currentPlayingIndex !== null ? episodes[currentPlayingIndex] : null;
 
   return (
@@ -437,33 +493,60 @@ export default function App() {
                           : 'bg-white border-neutral-200 shadow-sm hover:border-neutral-300'
                       }`}
                     >
-                      <div className="flex items-start gap-4">
-                        <button 
-                          onClick={() => playEpisode(index)}
-                          className={`flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center transition-colors ${
-                            isPlayingThis 
-                              ? 'bg-white text-neutral-900' 
-                              : 'bg-neutral-100 text-neutral-600 hover:bg-neutral-200 hover:text-neutral-900'
-                          }`}
-                        >
-                          {isPlayingThis && isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 ml-1" />}
-                        </button>
-                        <div className="flex-1 min-w-0">
-                          <h3 className={`font-semibold truncate ${isPlayingThis ? 'text-white' : 'text-neutral-900'}`}>
-                            {ep.title}
-                          </h3>
-                          <p className={`text-xs mt-1 truncate ${isPlayingThis ? 'text-neutral-300' : 'text-neutral-400'}`}>
-                            {new Date(ep.date).toLocaleString('pt-BR')}
-                          </p>
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div className="flex items-start gap-3 min-w-0 flex-1">
+                          <button 
+                            onClick={() => playEpisode(index)}
+                            className={`flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center transition-colors ${
+                              isPlayingThis 
+                                ? 'bg-white text-neutral-900' 
+                                : 'bg-neutral-100 text-neutral-600 hover:bg-neutral-200 hover:text-neutral-900'
+                            }`}
+                          >
+                            {isPlayingThis && isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 ml-1" />}
+                          </button>
+                          <div className="flex-1 min-w-0">
+                            <h3 className={`font-semibold truncate ${isPlayingThis ? 'text-white' : 'text-neutral-900'}`}>
+                              {ep.title}
+                            </h3>
+                            <p className={`text-xs mt-1 truncate ${isPlayingThis ? 'text-neutral-300' : 'text-neutral-400'}`}>
+                              {new Date(ep.date).toLocaleString('pt-BR')}
+                            </p>
+                          </div>
+                        </div>
+
+                        {/* Download & WhatsApp Share Buttons */}
+                        <div className="flex items-center gap-2 self-end sm:self-center flex-shrink-0 pl-13 sm:pl-0">
+                          <button
+                            onClick={(e) => handleDownload(ep, e)}
+                            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                              isPlayingThis
+                                ? 'bg-neutral-800 text-neutral-200 hover:bg-neutral-700 hover:text-white border border-neutral-700'
+                                : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200 border border-neutral-200'
+                            }`}
+                            title="Baixar arquivo de áudio (.wav)"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                            <span>Baixar</span>
+                          </button>
+                          
+                          <button
+                            onClick={(e) => handleShareWhatsApp(ep, e)}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm"
+                            title="Baixar e Compartilhar no WhatsApp"
+                          >
+                            <Share2 className="w-3.5 h-3.5" />
+                            <span>WhatsApp</span>
+                          </button>
                         </div>
                       </div>
                       
                       {!isPlayingThis && (
                         <details className="mt-3 text-sm text-neutral-600 group">
-                          <summary className="cursor-pointer font-medium hover:text-neutral-900 pl-14">
+                          <summary className="cursor-pointer font-medium hover:text-neutral-900 pl-13">
                             Ver roteiro
                           </summary>
-                          <div className="mt-2 p-3 bg-neutral-50 rounded-lg border border-neutral-100 whitespace-pre-wrap leading-relaxed ml-14">
+                          <div className="mt-2 p-3 bg-neutral-50 rounded-lg border border-neutral-100 whitespace-pre-wrap leading-relaxed ml-13">
                             {ep.description}
                           </div>
                         </details>
@@ -489,9 +572,9 @@ export default function App() {
       {currentEpisode && (
         <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-neutral-200 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)] p-3 sm:p-4 transform transition-transform">
           <div className="max-w-7xl mx-auto px-2 sm:px-4 md:px-6 flex items-center justify-between gap-4">
-            <div className="flex items-center gap-4 min-w-0 flex-1">
-              <div className="w-12 h-12 bg-neutral-100 rounded-lg flex items-center justify-center flex-shrink-0">
-                <Radio className="w-6 h-6 text-neutral-400" />
+            <div className="flex items-center gap-3 sm:gap-4 min-w-0 flex-1">
+              <div className="w-10 h-10 sm:w-12 sm:h-12 bg-neutral-100 rounded-lg flex items-center justify-center flex-shrink-0">
+                <Radio className="w-5 h-5 sm:w-6 sm:h-6 text-neutral-400" />
               </div>
               <div className="min-w-0">
                 <p className="text-xs font-bold text-neutral-500 uppercase tracking-wider mb-0.5">Tocando Agora</p>
@@ -499,16 +582,36 @@ export default function App() {
               </div>
             </div>
             
-            <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2 sm:gap-3">
+              <button
+                onClick={(e) => handleDownload(currentEpisode, e)}
+                className="p-2 text-neutral-700 hover:text-neutral-900 hover:bg-neutral-100 rounded-lg transition-colors flex items-center gap-1 text-xs font-medium border border-neutral-200"
+                title="Baixar áudio (.wav)"
+              >
+                <Download className="w-4 h-4" />
+                <span className="hidden md:inline">Baixar</span>
+              </button>
+
+              <button
+                onClick={(e) => handleShareWhatsApp(currentEpisode, e)}
+                className="p-2 text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition-colors flex items-center gap-1 text-xs font-medium shadow-sm"
+                title="Baixar e Compartilhar no WhatsApp"
+              >
+                <Share2 className="w-4 h-4" />
+                <span className="hidden md:inline">WhatsApp</span>
+              </button>
+
+              <div className="h-5 w-px bg-neutral-200 mx-0.5"></div>
+
               <button 
                 onClick={togglePlay}
-                className="w-12 h-12 bg-neutral-900 text-white rounded-full flex items-center justify-center hover:bg-neutral-800 transition-transform hover:scale-105 active:scale-95"
+                className="w-10 h-10 sm:w-12 sm:h-12 bg-neutral-900 text-white rounded-full flex items-center justify-center hover:bg-neutral-800 transition-transform hover:scale-105 active:scale-95"
               >
-                {isPlaying ? <Pause className="w-6 h-6" /> : <Play className="w-6 h-6 ml-1" />}
+                {isPlaying ? <Pause className="w-5 h-5 sm:w-6 sm:h-6" /> : <Play className="w-5 h-5 sm:w-6 sm:h-6 ml-1" />}
               </button>
               <button 
                 onClick={handleAudioEnded}
-                className="w-10 h-10 text-neutral-400 hover:text-neutral-900 rounded-full flex items-center justify-center hover:bg-neutral-100 transition-colors"
+                className="w-9 h-9 sm:w-10 sm:h-10 text-neutral-400 hover:text-neutral-900 rounded-full flex items-center justify-center hover:bg-neutral-100 transition-colors"
                 title="Pular para o próximo"
               >
                 <SkipForward className="w-5 h-5" />
