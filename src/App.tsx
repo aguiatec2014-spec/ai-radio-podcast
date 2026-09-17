@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect, useRef } from 'react';
-import { PlayCircle, Plus, Rss, Radio, Podcast, Loader2, Link2, ListPlus, Pause, SkipForward, Play, X, Zap, Download, Share2 } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { PlayCircle, Plus, Rss, Radio, Podcast, Loader2, Link2, ListPlus, Pause, SkipForward, Play, X, Zap, Download, Share2, CloudSun, AlertCircle } from 'lucide-react';
 
 interface Episode {
   id: string;
@@ -15,14 +15,16 @@ interface Episode {
 }
 
 export default function App() {
-  const [rssUrl, setRssUrl] = useState('https://g1.globo.com/rss/g1/');
+  const [rssUrl, setRssUrl] = useState('https://open-meteo.com/clima-brasil');
   const [savedSources, setSavedSources] = useState<string[]>([
+    'https://open-meteo.com/clima-brasil',
     'https://g1.globo.com/rss/g1/',
     'https://ccm.artesp.sp.gov.br/rodovias/ocorrencias',
     'https://news.google.com/rss/search?q=mudan%C3%A7as+clim%C3%A1ticas+brasil&hl=pt-BR&gl=BR&ceid=BR:pt-419',
     'https://news.google.com.br'
   ]);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [episodes, setEpisodes] = useState<Episode[]>([]);
   const [showQuotaPopup, setShowQuotaPopup] = useState(false);
   const [episodesGenerated, setEpisodesGenerated] = useState(0);
@@ -148,9 +150,22 @@ export default function App() {
     }
   };
 
+  const normalizeInputUrl = (raw: string): string => {
+    let url = raw.trim();
+    if (!url) return '';
+    if (url === 'feed.xml' || url === '/feed.xml') {
+      return '/feed.xml';
+    }
+    if (!/^https?:\/\//i.test(url) && !url.startsWith('/')) {
+      return 'https://' + url;
+    }
+    return url;
+  };
+
   const handleAddSource = () => {
-    if (rssUrl && !savedSources.includes(rssUrl)) {
-      setSavedSources([...savedSources, rssUrl]);
+    const clean = normalizeInputUrl(rssUrl);
+    if (clean && !savedSources.includes(clean)) {
+      setSavedSources(prev => [...prev, clean]);
     }
   };
 
@@ -161,14 +176,16 @@ export default function App() {
 
   const handleAutoGenerateAll = async () => {
     if (savedSources.length === 0) return;
+    setErrorMessage(null);
     setIsGenerating(true);
     let genCount = episodesGenerated;
     try {
       for (const sourceUrl of savedSources) {
+        const cleanUrl = normalizeInputUrl(sourceUrl);
         const res = await fetch('/api/generate-episode', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ rssUrl: sourceUrl })
+          body: JSON.stringify({ rssUrl: cleanUrl })
         });
         const data = await res.json();
         if (res.ok && !data.error) {
@@ -183,27 +200,33 @@ export default function App() {
           if (data.error === "QUOTA_EXCEEDED") {
             setShowQuotaPopup(true);
             break; 
+          } else {
+            console.warn("Falha no item do lote:", data.error);
           }
         }
       }
       setEpisodesGenerated(genCount);
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      alert("Falha na geração em lote.");
+      setErrorMessage("Falha na geração em lote: " + (err.message || "Erro de conexão"));
     } finally {
       setIsGenerating(false);
     }
   };
 
   const handleGenerate = async () => {
-    if (!rssUrl) return;
-    handleAddSource();
+    const cleanUrl = normalizeInputUrl(rssUrl);
+    if (!cleanUrl) return;
+    setErrorMessage(null);
+    if (!savedSources.includes(cleanUrl)) {
+      setSavedSources(prev => [...prev, cleanUrl]);
+    }
     setIsGenerating(true);
     try {
       const res = await fetch('/api/generate-episode', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rssUrl })
+        body: JSON.stringify({ rssUrl: cleanUrl })
       });
       const data = await res.json();
       if (res.ok && !data.error) {
@@ -219,12 +242,12 @@ export default function App() {
         if (data.error === "QUOTA_EXCEEDED") {
           setShowQuotaPopup(true);
         } else {
-          alert("Erro: " + (data.error || "Falha desconhecida"));
+          setErrorMessage(data.error || "Falha ao gerar episódio.");
         }
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      alert("Falha na geração do episódio.");
+      setErrorMessage("Falha na conexão com o servidor: " + (err.message || "Tente novamente"));
     } finally {
       setIsGenerating(false);
     }
@@ -335,6 +358,16 @@ export default function App() {
     window.open(whatsappUrl, '_blank', 'noopener,noreferrer');
   };
 
+  const getSourceLabel = (url: string) => {
+    if (url.includes('open-meteo') || url.includes('clima-brasil')) return '🌦️ Open-Meteo: Clima 27 Capitais';
+    if (url.includes('artesp')) return '🚗 Artesp: Rodovias SP';
+    if (url.includes('mudan%C3%A7as+clim%C3%A1ticas')) return '🌱 Google Notícias: Mudanças Climáticas';
+    if (url.includes('news.google')) return '📰 Google Notícias Brasil';
+    if (url.includes('g1.globo.com')) return '🔴 G1 Notícias';
+    if (url.includes('feed.xml')) return '📻 Feed do Podcast (XML)';
+    return url.replace(/^https?:\/\//i, '').replace(/^www\./i, '');
+  };
+
   const currentEpisode = currentPlayingIndex !== null ? episodes[currentPlayingIndex] : null;
 
   return (
@@ -373,16 +406,55 @@ export default function App() {
                 Gerador de Episódio
               </h2>
               <div className="space-y-4">
+                {errorMessage && (
+                  <div className="p-3 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2.5 text-xs text-red-700">
+                    <AlertCircle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
+                    <div className="flex-1">
+                      <p className="font-semibold">Atenção ao gerar episódio:</p>
+                      <p className="mt-0.5">{errorMessage}</p>
+                    </div>
+                    <button 
+                      onClick={() => setErrorMessage(null)} 
+                      className="text-red-400 hover:text-red-600 p-0.5"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+
                 <div>
-                  <label className="block text-sm font-medium text-neutral-700 mb-1">
-                    Fonte de Dados (URL RSS ou ARTESP)
-                  </label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-sm font-medium text-neutral-700">
+                      Fonte de Dados (URL RSS, Artesp ou Clima)
+                    </label>
+                  </div>
+                  
+                  {/* Quick Preset Badge for Weather */}
+                  <div className="mb-2">
+                    <button
+                      type="button"
+                      onClick={() => setRssUrl('https://open-meteo.com/clima-brasil')}
+                      className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium border transition-all ${
+                        rssUrl.includes('open-meteo')
+                          ? 'bg-sky-50 text-sky-800 border-sky-300 shadow-sm'
+                          : 'bg-neutral-50 text-neutral-700 hover:bg-neutral-100 border-neutral-200'
+                      }`}
+                      title="Selecionar Previsão do Tempo das 27 Capitais do Brasil via API Open-Meteo"
+                    >
+                      <div className="flex items-center gap-2">
+                        <CloudSun className="w-4 h-4 text-sky-600" />
+                        <span className="font-semibold">🌦️ Clima Brasil (27 Capitais - Open-Meteo)</span>
+                      </div>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-200/60 text-sky-800 font-mono">API Real</span>
+                    </button>
+                  </div>
+
                   <div className="flex gap-2">
                     <input 
                       type="url"
                       value={rssUrl}
                       onChange={(e) => setRssUrl(e.target.value)}
-                      className="flex-1 px-4 py-2 border border-neutral-300 rounded-lg focus:ring-2 focus:ring-neutral-900 focus:outline-none"
+                      className="flex-1 px-4 py-2 border border-neutral-300 rounded-lg focus:ring-2 focus:ring-neutral-900 focus:outline-none text-sm"
                       placeholder="https://..."
                     />
                     <button 
@@ -446,8 +518,9 @@ export default function App() {
                           ? 'text-neutral-900 font-medium' 
                           : 'text-neutral-500 hover:text-neutral-700'
                       }`}
+                      title={source}
                     >
-                      {source}
+                      {getSourceLabel(source)}
                     </button>
                     <button 
                       onClick={(e) => handleRemoveSource(source, e)}
