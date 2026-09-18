@@ -254,7 +254,20 @@ export default function App() {
   };
 
   // Player controls
+  const playTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
   useEffect(() => {
+    // Stop current playback and clear existing timeout when index changes
+    if (playTimeoutRef.current) {
+      clearTimeout(playTimeoutRef.current);
+    }
+    
+    if (audioRef.current) {
+      audioRef.current.pause();
+      // Important: resetting the time ensures a fresh start
+      audioRef.current.currentTime = 0;
+    }
+
     if (currentPlayingIndex !== null && audioRef.current) {
       const currentEpisode = episodes[currentPlayingIndex];
       const isTime = currentEpisode?.title?.includes("Hora Certa");
@@ -262,23 +275,47 @@ export default function App() {
       playSyntheticTransition(isTime ? 'time-in' : 'in');
       
       // Delay to let transition play
-      setTimeout(() => {
+      playTimeoutRef.current = setTimeout(() => {
          if (audioRef.current) {
-            audioRef.current.play().catch(e => console.error("Audio play failed:", e));
-            setIsPlaying(true);
+            const playPromise = audioRef.current.play();
+            if (playPromise !== undefined) {
+              playPromise
+                .then(() => {
+                  setIsPlaying(true);
+                })
+                .catch(e => {
+                  // We ignore AbortError as it's expected when src changes rapidly
+                  if (e.name !== 'AbortError') {
+                    console.error("Audio play failed:", e);
+                  }
+                });
+            }
          }
       }, isTime ? 1200 : 600);
     }
+
+    return () => {
+      if (playTimeoutRef.current) {
+        clearTimeout(playTimeoutRef.current);
+      }
+    };
   }, [currentPlayingIndex]);
 
   const togglePlay = () => {
     if (!audioRef.current) return;
     if (isPlaying) {
       audioRef.current.pause();
+      setIsPlaying(false);
     } else {
-      audioRef.current.play().catch(e => console.error(e));
+      const playPromise = audioRef.current.play();
+      if (playPromise !== undefined) {
+        playPromise
+          .then(() => setIsPlaying(true))
+          .catch(e => {
+            if (e.name !== 'AbortError') console.error(e);
+          });
+      }
     }
-    setIsPlaying(!isPlaying);
   };
 
   const handleAudioEnded = () => {
@@ -638,6 +675,8 @@ export default function App() {
         ref={audioRef}
         src={currentEpisode?.audioUrl}
         onEnded={handleAudioEnded}
+        onPlay={() => setIsPlaying(true)}
+        onPause={() => setIsPlaying(false)}
         className="hidden"
       />
 
