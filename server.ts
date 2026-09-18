@@ -214,73 +214,154 @@ function decodeWmoWeatherCode(code: number): string {
 
 let cachedWeatherData: any = null;
 let lastWeatherFetchTime: number = 0;
-const WEATHER_CACHE_TTL = 15 * 60 * 1000; // 15 minutes
+let weatherRequestInFlight: Promise<any> | null = null;
+const WEATHER_CACHE_TTL = 30 * 60 * 1000; // 30 minutes
 
 async function fetchOpenMeteoBrazilWeather() {
-  const now = Date.now();
-  if (cachedWeatherData && (now - lastWeatherFetchTime < WEATHER_CACHE_TTL)) {
-    console.log("[Open-Meteo] Retornando dados do cache (cache fresh).");
-    return cachedWeatherData;
+  if (weatherRequestInFlight) {
+    console.log("[Open-Meteo] Já existe uma requisição em andamento, aguardando...");
+    return weatherRequestInFlight;
   }
 
-  const lats = BRAZIL_CAPITALS.map(c => c.lat).join(",");
-  const lons = BRAZIL_CAPITALS.map(c => c.lon).join(",");
-  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lats}&longitude=${lons}&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m&timezone=America%2FSao_Paulo`;
+  weatherRequestInFlight = (async () => {
+    try {
+      const now = Date.now();
+      if (cachedWeatherData && (now - lastWeatherFetchTime < WEATHER_CACHE_TTL)) {
+        console.log("[Open-Meteo] Retornando dados do cache (cache fresh).");
+        return cachedWeatherData;
+      }
 
-  console.log("[Open-Meteo] Buscando novos dados da API...");
-  const response = await fetch(url);
-  if (!response.ok) {
-    if (response.status === 429 && cachedWeatherData) {
-       console.warn("[Open-Meteo] Recebido 429, mas temos cache (mesmo expirado). Usando cache de emergência.");
-       return cachedWeatherData;
+      const lats = BRAZIL_CAPITALS.map(c => c.lat).join(",");
+      const lons = BRAZIL_CAPITALS.map(c => c.lon).join(",");
+      const url = `https://api.open-meteo.com/v1/forecast?latitude=${lats}&longitude=${lons}&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m&timezone=America%2FSao_Paulo`;
+
+      console.log("[Open-Meteo] Buscando novos dados da API...");
+      
+      let response: Response | null = null;
+      // Simple retry logic
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          response = await fetch(url, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (AI Radio Studio; bot) AppleWebKit/537.36'
+            }
+          });
+          if (response.ok) break;
+          if (response.status === 429) {
+            console.warn(`[Open-Meteo] 429 detectado, aguardando 2s (tentativa ${attempt + 1})...`);
+            await new Promise(r => setTimeout(r, 2000));
+          } else {
+            break;
+          }
+        } catch (e) {
+          console.error("[Open-Meteo] Falha na tentativa de fetch:", e);
+        }
+      }
+
+      if (!response || !response.ok) {
+        if (cachedWeatherData) {
+           console.warn(`[Open-Meteo] API falhou (Status ${response?.status}), mas temos cache. Usando cache de emergência.`);
+           return cachedWeatherData;
+        }
+        
+        // --- FALLBACK ROBUSTO: Google Search Grounding ---
+        console.warn("[Open-Meteo] API indisponível e sem cache. Acionando Fallback com Gemini Grounding...");
+        try {
+           const prompt = `
+             Aja como uma API de clima. Retorne o clima ATUAL das capitais brasileiras (São Paulo, Rio de Janeiro, Brasília, Salvador, Fortaleza, Belo Horizonte, Manaus, Curitiba, Recife, Porto Alegre). 
+             Preciso da Temperatura atual e Condição (sol, chuva, nublado).
+             Retorne apenas um JSON estruturado com o campo "summary" contendo:
+             - totalCapitais: 10
+             - capitalMaisQuente: "Cidade com Temp"
+             - capitalMaisFria: "Cidade com Temp"
+             - capitaisComChuvaOuInstabilidade: ["Cidade: Condição"]
+             - panoramaPorRegioes: { "Sudeste": [...], "Sul": [...], etc }
+           `;
+
+           const interaction = await ai.interactions.create({ 
+             model: "gemini-3.8-flash",
+             input: prompt,
+             tools: [{ type: 'google_search' } as any],
+           });
+
+           let responseText = "";
+           for (const step of interaction.steps) {
+             if (step.type === 'model_output') {
+               const textContent = step.content?.find(c => c.type === 'text');
+               if (textContent && textContent.text) {
+                 responseText += textContent.text;
+               }
+             }
+           }
+
+           const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+           if (jsonMatch) {
+             const fallbackData = JSON.parse(jsonMatch[0]);
+             cachedWeatherData = {
+               capitais: [], // Placeholder for mapping if needed
+               summary: fallbackData.summary || fallbackData
+             };
+             lastWeatherFetchTime = now;
+             return cachedWeatherData;
+           }
+        } catch (groundingErr) {
+           console.error("[Grounding Fallback] Falhou também:", groundingErr);
+        }
+
+        throw new Error(`Erro ao consultar API Open-Meteo: Status ${response?.status || 'Unknown'}`);
+      }
+
+      const data = await response.json();
+      if (!Array.isArray(data) || data.length !== BRAZIL_CAPITALS.length) {
+        throw new Error("Formato de resposta inesperado retornado pela API Open-Meteo");
+      }
+
+      const capitalWeather = BRAZIL_CAPITALS.map((cap, i) => {
+        const cur = data[i]?.current || {};
+        return {
+          cidade: `${cap.city} (${cap.state})`,
+          regiao: cap.region,
+          temperatura: cur.temperature_2m,
+          sensacao: cur.apparent_temperature,
+          umidade: cur.relative_humidity_2m,
+          condicao: decodeWmoWeatherCode(cur.weather_code || 0),
+          chuva_mm: cur.precipitation || 0,
+          vento_kmh: cur.wind_speed_10m || 0
+        };
+      });
+
+      const sortedByTemp = [...capitalWeather].sort((a, b) => b.temperatura - a.temperatura);
+      const maisQuente = sortedByTemp[0];
+      const maisFria = sortedByTemp[sortedByTemp.length - 1];
+      const comChuva = capitalWeather.filter(c => c.chuva_mm > 0 || c.condicao.toLowerCase().includes("chuva") || c.condicao.toLowerCase().includes("tempestade"));
+
+      const regioes: Record<string, any[]> = {
+        "Sudeste": capitalWeather.filter(c => c.regiao === "Sudeste"),
+        "Sul": capitalWeather.filter(c => c.regiao === "Sul"),
+        "Nordeste": capitalWeather.filter(c => c.regiao === "Nordeste"),
+        "Centro-Oeste": capitalWeather.filter(c => c.regiao === "Centro-Oeste"),
+        "Norte": capitalWeather.filter(c => c.regiao === "Norte")
+      };
+
+      cachedWeatherData = {
+        capitais: capitalWeather,
+        summary: {
+          totalCapitais: 27,
+          capitalMaisQuente: `${maisQuente.cidade} com ${maisQuente.temperatura}°C (${maisQuente.condicao})`,
+          capitalMaisFria: `${maisFria.cidade} com ${maisFria.temperatura}°C (${maisFria.condicao})`,
+          capitaisComChuvaOuInstabilidade: comChuva.length > 0 ? comChuva.map(c => `${c.cidade}: ${c.condicao} com ${c.temperatura}°C`) : ["Nenhuma capital com chuva registrada no momento"],
+          panoramaPorRegioes: regioes
+        }
+      };
+      
+      lastWeatherFetchTime = now;
+      return cachedWeatherData;
+    } finally {
+      weatherRequestInFlight = null;
     }
-    throw new Error(`Erro ao consultar API Open-Meteo: Status ${response.status}`);
-  }
-  const data = await response.json();
-  if (!Array.isArray(data) || data.length !== BRAZIL_CAPITALS.length) {
-    throw new Error("Formato de resposta inesperado retornado pela API Open-Meteo");
-  }
+  })();
 
-  const capitalWeather = BRAZIL_CAPITALS.map((cap, i) => {
-    const cur = data[i]?.current || {};
-    return {
-      cidade: `${cap.city} (${cap.state})`,
-      regiao: cap.region,
-      temperatura: cur.temperature_2m,
-      sensacao: cur.apparent_temperature,
-      umidade: cur.relative_humidity_2m,
-      condicao: decodeWmoWeatherCode(cur.weather_code || 0),
-      chuva_mm: cur.precipitation || 0,
-      vento_kmh: cur.wind_speed_10m || 0
-    };
-  });
-
-  const sortedByTemp = [...capitalWeather].sort((a, b) => b.temperatura - a.temperatura);
-  const maisQuente = sortedByTemp[0];
-  const maisFria = sortedByTemp[sortedByTemp.length - 1];
-  const comChuva = capitalWeather.filter(c => c.chuva_mm > 0 || c.condicao.toLowerCase().includes("chuva") || c.condicao.toLowerCase().includes("tempestade"));
-
-  const regioes: Record<string, any[]> = {
-    "Sudeste": capitalWeather.filter(c => c.regiao === "Sudeste"),
-    "Sul": capitalWeather.filter(c => c.regiao === "Sul"),
-    "Nordeste": capitalWeather.filter(c => c.regiao === "Nordeste"),
-    "Centro-Oeste": capitalWeather.filter(c => c.regiao === "Centro-Oeste"),
-    "Norte": capitalWeather.filter(c => c.regiao === "Norte")
-  };
-
-  cachedWeatherData = {
-    capitais: capitalWeather,
-    summary: {
-      totalCapitais: 27,
-      capitalMaisQuente: `${maisQuente.cidade} com ${maisQuente.temperatura}°C (${maisQuente.condicao})`,
-      capitalMaisFria: `${maisFria.cidade} com ${maisFria.temperatura}°C (${maisFria.condicao})`,
-      capitaisComChuvaOuInstabilidade: comChuva.length > 0 ? comChuva.map(c => `${c.cidade}: ${c.condicao} com ${c.temperatura}°C`) : ["Nenhuma capital com chuva registrada no momento"],
-      panoramaPorRegioes: regioes
-    }
-  };
-  
-  lastWeatherFetchTime = now;
-  return cachedWeatherData;
+  return weatherRequestInFlight;
 }
 
 // API Routes
