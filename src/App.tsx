@@ -4,7 +4,8 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
-import { PlayCircle, Plus, Rss, Radio, Podcast, Loader2, Link2, ListPlus, Pause, SkipForward, Play, X, Zap, Download, Share2, CloudSun, AlertCircle, Clock } from 'lucide-react';
+import { PlayCircle, Plus, Rss, Radio, Podcast, Loader2, Link2, ListPlus, Pause, SkipForward, Play, X, Zap, Download, Share2, CloudSun, AlertCircle, Clock, Landmark, Scale, FileText, Megaphone } from 'lucide-react';
+import { motion } from 'motion/react';
 
 interface Episode {
   id: string;
@@ -15,15 +16,19 @@ interface Episode {
 }
 
 export default function App() {
-  const [rssUrl, setRssUrl] = useState('https://open-meteo.com/clima-brasil');
+  const [rssUrl, setRssUrl] = useState('https://radio-voz-do-povo.leg.br/leis-e-acoes-do-dia');
   const [savedSources, setSavedSources] = useState<string[]>([
+    'https://radio-voz-do-povo.leg.br/leis-e-acoes-do-dia',
+    'https://www.congressonacional.leg.br/materias/ultimas-leis-publicadas',
+    'https://dadosabertos.camara.leg.br/api/v2/votacoes',
     'https://open-meteo.com/clima-brasil',
+    'https://agenciabrasil.ebc.com.br/rss/politica/feed.xml',
     'https://g1.globo.com/rss/g1/',
     'https://ccm.artesp.sp.gov.br/rodovias/ocorrencias',
-    'https://news.google.com/rss/search?q=mudan%C3%A7as+clim%C3%A1ticas+brasil&hl=pt-BR&gl=BR&ceid=BR:pt-419',
-    'https://news.google.com.br'
+    'https://news.google.com/rss/search?q=mudan%C3%A7as+clim%C3%A1ticas+brasil&hl=pt-BR&gl=BR&ceid=BR:pt-419'
   ]);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isAnnouncingTime, setIsAnnouncingTime] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [episodes, setEpisodes] = useState<Episode[]>([]);
   const [showQuotaPopup, setShowQuotaPopup] = useState(false);
@@ -202,6 +207,8 @@ export default function App() {
   };
 
   const generateTimeAnnouncement = async () => {
+    if (isAnnouncingTime) return;
+    setIsAnnouncingTime(true);
     try {
       const timeString = formatTimeString();
       const res = await fetch('/api/generate-time', {
@@ -212,9 +219,13 @@ export default function App() {
       const data = await res.json();
       if (res.ok && !data.error) {
         handleNewEpisodeGenerated(data);
+      } else if (data.error === "QUOTA_EXCEEDED") {
+        setShowQuotaPopup(true);
       }
     } catch (err) {
       console.error("Erro ao gerar anuncio de hora:", err);
+    } finally {
+      setIsAnnouncingTime(false);
     }
   };
 
@@ -247,35 +258,44 @@ export default function App() {
     setErrorMessage(null);
     setIsGenerating(true);
     let genCount = episodesGenerated;
+    let failCount = 0;
     try {
       for (const sourceUrl of savedSources) {
-        const cleanUrl = normalizeInputUrl(sourceUrl);
-        const res = await fetch('/api/generate-episode', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ rssUrl: cleanUrl })
-        });
-        const data = await res.json();
-        if (res.ok && !data.error) {
-          handleNewEpisodeGenerated(data);
-          
-          genCount++;
-          if (genCount % 3 === 0) {
-            await generateTimeAnnouncement();
-          }
-        } else {
-          if (data.error === "QUOTA_EXCEEDED") {
-            setShowQuotaPopup(true);
-            break; 
+        try {
+          const cleanUrl = normalizeInputUrl(sourceUrl);
+          const res = await fetch('/api/generate-episode', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ rssUrl: cleanUrl })
+          });
+          const data = await res.json();
+          if (res.ok && !data.error) {
+            handleNewEpisodeGenerated(data);
+            genCount++;
           } else {
-            console.warn("Falha no item do lote:", data.error);
+            if (data.error === "QUOTA_EXCEEDED") {
+              setShowQuotaPopup(true);
+              break; 
+            } else {
+              console.warn("Falha no item do lote:", data.error);
+              failCount++;
+            }
           }
+        } catch (itemErr: any) {
+          console.error("Erro ao gerar item individual:", itemErr);
+          failCount++;
         }
       }
       setEpisodesGenerated(genCount);
+      if (failCount > 0 && genCount === episodesGenerated) {
+        setErrorMessage("Não foi possível gerar todos os episódios do lote. Verifique as fontes ou tente novamente.");
+      }
     } catch (err: any) {
       console.error(err);
-      setErrorMessage("Falha na geração em lote: " + (err.message || "Erro de conexão"));
+      const isFetchErr = err.message?.includes("Failed to fetch") || err.name === "TypeError";
+      setErrorMessage(isFetchErr 
+        ? "Instabilidade de conexão com o servidor. Tente novamente em instantes." 
+        : "Falha na geração em lote: " + (err.message || "Erro de conexão"));
     } finally {
       setIsGenerating(false);
     }
@@ -298,12 +318,7 @@ export default function App() {
       const data = await res.json();
       if (res.ok && !data.error) {
         handleNewEpisodeGenerated(data);
-        
-        const newCount = episodesGenerated + 1;
-        setEpisodesGenerated(newCount);
-        if (newCount % 3 === 0) {
-          await generateTimeAnnouncement();
-        }
+        setEpisodesGenerated(prev => prev + 1);
       } else {
         if (data.error === "QUOTA_EXCEEDED") {
           setShowQuotaPopup(true);
@@ -313,7 +328,10 @@ export default function App() {
       }
     } catch (err: any) {
       console.error(err);
-      setErrorMessage("Falha na conexão com o servidor: " + (err.message || "Tente novamente"));
+      const isFetchErr = err.message?.includes("Failed to fetch") || err.name === "TypeError";
+      setErrorMessage(isFetchErr
+        ? "Instabilidade temporária na conexão com o servidor. Tente novamente em instantes."
+        : "Falha ao processar a geração: " + (err.message || "Tente novamente"));
     } finally {
       setIsGenerating(false);
     }
@@ -430,6 +448,11 @@ export default function App() {
   };
 
   const getSourceLabel = (url: string) => {
+    if (url.includes('voz-do-povo') || url.includes('leis-e-acoes')) return '📢 Rádio Voz do Povo: Leis & Votações do Dia';
+    if (url.includes('congressonacional.leg.br')) return '📜 Congresso Nacional: Últimas Leis (DOU)';
+    if (url.includes('camara.leg.br')) return '🏛️ Câmara dos Deputados: Votações & Projetos';
+    if (url.includes('senado.leg.br')) return '🏛️ Senado Federal: Matérias Legislativas';
+    if (url.includes('agenciabrasil.ebc.com.br')) return '🇧🇷 Agência Brasil: Política e Governo';
     if (url.includes('open-meteo') || url.includes('clima-brasil')) return '🌦️ Open-Meteo: Clima 27 Capitais';
     if (url.includes('artesp')) return '🚗 Artesp: Rodovias SP';
     if (url.includes('mudan%C3%A7as+clim%C3%A1ticas')) return '🌱 Google Notícias: Mudanças Climáticas';
@@ -494,29 +517,46 @@ export default function App() {
                 )}
 
                 <div>
-                  <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center justify-between mb-1.5">
                     <label className="block text-sm font-medium text-neutral-700">
-                      Fonte de Dados (URL RSS, Artesp ou Clima)
+                      Fonte de Dados (Legislativo, Clima, Artesp ou RSS)
                     </label>
                   </div>
                   
-                  {/* Quick Preset Badge for Weather */}
-                  <div className="mb-2">
+                  {/* Quick Preset Badges */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2.5">
+                    <button
+                      type="button"
+                      onClick={() => setRssUrl('https://radio-voz-do-povo.leg.br/leis-e-acoes-do-dia')}
+                      className={`flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium border transition-all ${
+                        rssUrl.includes('voz-do-povo') || rssUrl.includes('leis-e-acoes')
+                          ? 'bg-emerald-50 text-emerald-800 border-emerald-300 shadow-sm'
+                          : 'bg-neutral-50 text-neutral-700 hover:bg-neutral-100 border-neutral-200'
+                      }`}
+                      title="Boletim Rádio Voz do Povo: Projetos, Leis e Votações do Congresso Nacional e Governo Federal"
+                    >
+                      <div className="flex items-center gap-1.5 truncate">
+                        <Megaphone className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0" />
+                        <span className="font-semibold truncate">Rádio Voz do Povo (Leis do Dia)</span>
+                      </div>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-200/60 text-emerald-800 font-mono ml-1">Gov</span>
+                    </button>
+
                     <button
                       type="button"
                       onClick={() => setRssUrl('https://open-meteo.com/clima-brasil')}
-                      className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium border transition-all ${
+                      className={`flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium border transition-all ${
                         rssUrl.includes('open-meteo')
                           ? 'bg-sky-50 text-sky-800 border-sky-300 shadow-sm'
                           : 'bg-neutral-50 text-neutral-700 hover:bg-neutral-100 border-neutral-200'
                       }`}
                       title="Selecionar Previsão do Tempo das 27 Capitais do Brasil via API Open-Meteo"
                     >
-                      <div className="flex items-center gap-2">
-                        <CloudSun className="w-4 h-4 text-sky-600" />
-                        <span className="font-semibold">🌦️ Clima Brasil (27 Capitais - Open-Meteo)</span>
+                      <div className="flex items-center gap-1.5 truncate">
+                        <CloudSun className="w-3.5 h-3.5 text-sky-600 flex-shrink-0" />
+                        <span className="font-semibold truncate">Clima Brasil (27 Capitais)</span>
                       </div>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-200/60 text-sky-800 font-mono">API Real</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-200/60 text-sky-800 font-mono ml-1">Clima</span>
                     </button>
                   </div>
 
@@ -614,15 +654,32 @@ export default function App() {
                 Playlist de Transmissão
               </h2>
               <div className="flex items-center gap-2">
-                <button
+                <motion.button
+                  id="btn-anunciar-hora-certa"
                   onClick={generateTimeAnnouncement}
-                  disabled={isGenerating}
-                  className="text-xs font-medium px-2.5 py-1.5 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 border border-neutral-200 rounded-lg flex items-center gap-1.5 transition-colors disabled:opacity-50"
+                  disabled={isGenerating || isAnnouncingTime}
+                  whileHover={!isGenerating && !isAnnouncingTime ? { scale: 1.04 } : {}}
+                  whileTap={!isGenerating && !isAnnouncingTime ? { scale: 0.94 } : {}}
+                  transition={{ type: "spring", stiffness: 450, damping: 18 }}
+                  className={`text-xs font-medium px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all select-none border shadow-xs cursor-pointer disabled:cursor-not-allowed ${
+                    isAnnouncingTime
+                      ? 'bg-amber-500 text-white border-amber-600 shadow-md ring-2 ring-amber-400/40 animate-pulse'
+                      : 'bg-neutral-100 hover:bg-neutral-200 text-neutral-700 border-neutral-200 hover:border-neutral-300 disabled:opacity-50'
+                  }`}
                   title="Gerar áudio de Hora Certa com formatação correta de minutos"
                 >
-                  <Clock className="w-3.5 h-3.5 text-neutral-600" />
-                  <span>Anunciar Hora Certa</span>
-                </button>
+                  {isAnnouncingTime ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-white" />
+                      <span>Sintetizando Hora Certa...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Clock className="w-3.5 h-3.5 text-neutral-600 transition-transform group-hover:rotate-12" />
+                      <span>Anunciar Hora Certa</span>
+                    </>
+                  )}
+                </motion.button>
                 <span className="text-xs font-medium px-2 py-1 bg-green-100 text-green-700 rounded-full flex items-center gap-1.5">
                   <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>
                   Autoplay Ativo

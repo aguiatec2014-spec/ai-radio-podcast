@@ -118,7 +118,8 @@ async function fetchArtespScraping(url: string) {
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9",
-      }
+      },
+      signal: AbortSignal.timeout(6000)
     });
 
     if (!response.ok) {
@@ -487,6 +488,157 @@ Retorne um objeto JSON com o array "capitais" contendo exatamente as 27 capitais
   return weatherRequestInFlight;
 }
 
+// ==========================================
+// FONTES GOVERNAMENTAIS & LEGISLATIVAS OFICIAIS
+// (Câmara dos Deputados, Senado, Congresso, DOU / Executivo)
+// ==========================================
+
+// 1. Congresso Nacional: Últimas Leis Publicadas & Sanções publicadas no Diário Oficial da União (DOU)
+async function fetchCongressoUltimasLeis() {
+  try {
+    const res = await fetch("https://www.congressonacional.leg.br/materias/ultimas-leis-publicadas", {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "text/html,application/xhtml+xml"
+      },
+      signal: AbortSignal.timeout(6000)
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const html = await res.text();
+    const blocks = html.split('<div class="sf-lista-resumos__resumo">').slice(1);
+    const clean = (str: string | undefined) => str ? str.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim() : "";
+    
+    const items: any[] = [];
+    for (const b of blocks.slice(0, 5)) {
+      const normaMatch = b.match(/<dt>\s*Norma:\s*<\/dt>\s*<dd>([\s\S]*?)<\/dd>/i);
+      const materiaMatch = b.match(/<dt>\s*Matéria:\s*<\/dt>\s*<dd>([\s\S]*?)<\/dd>/i);
+      const ementaMatch = b.match(/<dt>\s*Ementa:\s*<\/dt>\s*<dd>([\s\S]*?)<\/dd>/i);
+      const prazoMatch = b.match(/<dt>\s*Prazo para sanção:\s*<\/dt>\s*<dd>([\s\S]*?)<\/dd>/i);
+      const recebimentoMatch = b.match(/<dt>\s*Recebimento pela Presidência:\s*<\/dt>\s*<dd>([\s\S]*?)<\/dd>/i);
+      
+      const norma = clean(normaMatch?.[1]);
+      const materia = clean(materiaMatch?.[1]);
+      const ementa = clean(ementaMatch?.[1]);
+      
+      if (norma || ementa) {
+        items.push({
+          tipo: "Lei Publicada / Sancionada (DOU)",
+          norma,
+          materia,
+          ementa,
+          prazoSancao: clean(prazoMatch?.[1]),
+          recebimentoPresidencia: clean(recebimentoMatch?.[1])
+        });
+      }
+    }
+    return items;
+  } catch (err: any) {
+    console.error("[Congresso Nacional] Falha ao coletar últimas leis:", err.message);
+    return [];
+  }
+}
+
+// 2. Câmara dos Deputados: API de Dados Abertos (/votacoes e /proposicoes)
+async function fetchCamaraVotacoesEProposicoes() {
+  const result: { votacoesAprovadas: any[]; proposicoesRecentes: any[] } = {
+    votacoesAprovadas: [],
+    proposicoesRecentes: []
+  };
+
+  try {
+    const resVot = await fetch("https://dadosabertos.camara.leg.br/api/v2/votacoes?ordem=DESC&ordenarPor=dataHoraRegistro&itens=5", {
+      headers: { "Accept": "application/json" },
+      signal: AbortSignal.timeout(6000)
+    });
+    if (resVot.ok) {
+      const jsonVot = await resVot.json();
+      result.votacoesAprovadas = (jsonVot.dados || []).slice(0, 4).map((v: any) => ({
+        id: v.id,
+        data: v.data,
+        descricao: v.descricao,
+        siglaOrgao: v.siglaOrgao,
+        status: v.aprovacao === 1 ? "Aprovado" : "Em análise / Deliberação",
+        proposicaoObjeto: v.proposicaoObjeto
+      }));
+    }
+  } catch (err: any) {
+    console.error("[Câmara] Erro ao buscar votações:", err.message);
+  }
+
+  try {
+    const resProp = await fetch("https://dadosabertos.camara.leg.br/api/v2/proposicoes?ordem=DESC&ordenarPor=id&itens=5", {
+      headers: { "Accept": "application/json" },
+      signal: AbortSignal.timeout(6000)
+    });
+    if (resProp.ok) {
+      const jsonProp = await resProp.json();
+      result.proposicoesRecentes = (jsonProp.dados || []).slice(0, 4).map((p: any) => ({
+        sigla: `${p.siglaTipo} ${p.numero}/${p.ano}`,
+        ementa: p.ementa
+      })).filter((p: any) => p.ementa);
+    }
+  } catch (err: any) {
+    console.error("[Câmara] Erro ao buscar proposições:", err.message);
+  }
+
+  return result;
+}
+
+// 3. Senado Federal: API de Dados Abertos
+async function fetchSenadoMaterias() {
+  try {
+    const res = await fetch("https://legis.senado.leg.br/dadosabertos/materia/pesquisa/lista?ano=2026", {
+      headers: { "Accept": "application/json" },
+      signal: AbortSignal.timeout(6000)
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = await res.json();
+    const lista = json?.PesquisaBasicaMateria?.Materias?.Materia || [];
+    const materiasArray = Array.isArray(lista) ? lista : [lista];
+    return materiasArray.slice(0, 4).map((m: any) => ({
+      identificacao: `${m.DescricaoSubtipoMateria || 'Matéria'} ${m.NumeroMateria || ''}/${m.AnoMateria || ''}`,
+      ementa: m.EmentaMateria,
+      situacao: m.SituacaoAtual
+    })).filter((m: any) => m.ementa);
+  } catch (err: any) {
+    console.error("[Senado] Erro ao buscar matérias:", err.message);
+    return [];
+  }
+}
+
+// 4. Agência Brasil / EBC: Ações do Executivo Federal & Diário Oficial
+async function fetchAgenciaBrasilPolitica() {
+  try {
+    const feed = await parser.parseURL("https://agenciabrasil.ebc.com.br/rss/politica/feed.xml");
+    return (feed.items || []).slice(0, 4).map(item => ({
+      titulo: item.title,
+      resumo: item.contentSnippet || item.content
+    }));
+  } catch (err: any) {
+    console.error("[Agência Brasil] Erro ao carregar feed de política:", err.message);
+    return [];
+  }
+}
+
+// 5. Coletor Unificado "Rádio Voz do Povo"
+async function fetchGovVozDoPovoUnifiedData() {
+  const [leisRes, camaraRes, senadoRes, ebcRes] = await Promise.allSettled([
+    fetchCongressoUltimasLeis(),
+    fetchCamaraVotacoesEProposicoes(),
+    fetchSenadoMaterias(),
+    fetchAgenciaBrasilPolitica()
+  ]);
+
+  return {
+    origem: "Rádio Voz do Povo - Acompanhamento Legislativo e Executivo Oficial",
+    dataExtracao: new Date().toLocaleDateString('pt-BR'),
+    leisSancionadasCongressoDOU: (leisRes.status === 'fulfilled' ? leisRes.value : []).slice(0, 5),
+    camaraDeputados: camaraRes.status === 'fulfilled' ? camaraRes.value : { votacoesAprovadas: [], proposicoesRecentes: [] },
+    senadoFederal: (senadoRes.status === 'fulfilled' ? senadoRes.value : []).slice(0, 5),
+    acoesExecutivoEBC: (ebcRes.status === 'fulfilled' ? ebcRes.value : []).slice(0, 5)
+  };
+}
+
 // API Routes
 
 app.get('/api/episodes', (req, res) => {
@@ -513,41 +665,42 @@ app.post('/api/generate-time', async (req, res) => {
     const textPart2 = `repita...`;
     const textPart3 = `${trimmedTime}.`;
 
-    // 1. Male voice
-    const tts1 = await withRetry(() => ai.models.generateContent({
-      model: "gemini-3.1-flash-tts-preview",
-      contents: [{ parts: [{ text: textPart1 }] }],
-      config: {
-        responseModalities: [Modality.AUDIO],
-        speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Charon' } }, // Male
+    // Gerar os 3 trechos de áudio em paralelo para máxima agilidade
+    const [tts1, tts2, tts3] = await Promise.all([
+      // 1. Male voice
+      withRetry(() => ai.models.generateContent({
+        model: "gemini-3.1-flash-tts-preview",
+        contents: [{ parts: [{ text: textPart1 }] }],
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+              voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Charon' } }, // Male
+          },
         },
-      },
-    }));
-
-    // 2. Female voice
-    const tts2 = await withRetry(() => ai.models.generateContent({
-      model: "gemini-3.1-flash-tts-preview",
-      contents: [{ parts: [{ text: textPart2 }] }],
-      config: {
-        responseModalities: [Modality.AUDIO],
-        speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Aoede' } }, // Female
+      })),
+      // 2. Female voice
+      withRetry(() => ai.models.generateContent({
+        model: "gemini-3.1-flash-tts-preview",
+        contents: [{ parts: [{ text: textPart2 }] }],
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+              voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Aoede' } }, // Female
+          },
         },
-      },
-    }));
-
-    // 3. Male voice again
-    const tts3 = await withRetry(() => ai.models.generateContent({
-      model: "gemini-3.1-flash-tts-preview",
-      contents: [{ parts: [{ text: textPart3 }] }],
-      config: {
-        responseModalities: [Modality.AUDIO],
-        speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Charon' } }, // Male
+      })),
+      // 3. Male voice again
+      withRetry(() => ai.models.generateContent({
+        model: "gemini-3.1-flash-tts-preview",
+        contents: [{ parts: [{ text: textPart3 }] }],
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+              voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Charon' } }, // Male
+          },
         },
-      },
-    }));
+      }))
+    ]);
 
     const b64_1 = tts1.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
     const b64_2 = tts2.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
@@ -643,35 +796,80 @@ app.post('/api/generate-episode', async (req, res) => {
   try {
     let topItems: any[] = [];
     const isWeather = normalizedUrl.includes("open-meteo") || normalizedUrl.includes("clima-brasil") || normalizedUrl.includes("previsao-tempo");
+    const isVozDoPovo = normalizedUrl.includes("voz-do-povo") || normalizedUrl.includes("leis-e-acoes") || normalizedUrl.includes("gov-br");
+    const isCamara = normalizedUrl.includes("camara.leg.br");
+    const isCongresso = normalizedUrl.includes("congressonacional.leg.br");
+    const isSenado = normalizedUrl.includes("senado.leg.br");
+    const isAgenciaBrasil = normalizedUrl.includes("agenciabrasil.ebc.com.br");
+    const isGovNews = isVozDoPovo || isCamara || isCongresso || isSenado || isAgenciaBrasil;
+
     let scriptPrompt = "";
 
-    console.log(`[generate-episode] Início da geração para rssUrl: "${rssUrl}" (normalizada: "${normalizedUrl}", isWeather=${isWeather})`);
+    console.log(`[generate-episode] Início da geração para rssUrl: "${rssUrl}" (normalizada: "${normalizedUrl}", isWeather=${isWeather}, isGovNews=${isGovNews})`);
 
-    if (isWeather) {
+    if (isGovNews) {
+      console.log(`[generate-episode] Coletando dados oficiais do governo/legislativo (Voz do Povo=${isVozDoPovo}, Congresso=${isCongresso}, Câmara=${isCamara}, Senado=${isSenado}, EBC=${isAgenciaBrasil})...`);
+      
+      if (isVozDoPovo) {
+        topItems = await fetchGovVozDoPovoUnifiedData() as any;
+      } else if (isCongresso) {
+        topItems = await fetchCongressoUltimasLeis();
+      } else if (isCamara) {
+        topItems = await fetchCamaraVotacoesEProposicoes() as any;
+      } else if (isSenado) {
+        topItems = await fetchSenadoMaterias();
+      } else if (isAgenciaBrasil) {
+        topItems = await fetchAgenciaBrasilPolitica();
+      }
+
+      scriptPrompt = `
+        Você é o locutor principal da tradicional Rádio Voz do Povo, a emissora do trabalhador e da cidadania.
+        Com base nos dados governamentais e legislativos oficiais anexados (leis sancionadas no Diário Oficial da União, votações e proposições da Câmara dos Deputados, matérias do Senado Federal e ações do Poder Executivo), elabore uma edição completa, detalhada, vibrante e bem desenvolvida do nosso boletim oficial (entre 170 e 240 palavras, proporcionando aproximadamente 1 minuto a 1 minuto e 20 segundos de locução contínua).
+
+        Estrutura obrigatória da locução:
+        1. ABERTURA POPULAR E ENÉRGICA:
+           "Atenção trabalhadores e cidadãos de todo o Brasil! Está no ar a edição especial da Rádio Voz do Povo, trazendo as principais leis sancionadas e decisões aprovadas em Brasília que impactam diretamente a sua vida!"
+        
+        2. DESTAQUE DAS LEIS SANCIONADAS E APROVAÇÕES:
+           Apresente com clareza as principais leis publicadas no Diário Oficial, medidas provisórias e projetos aprovados no Congresso Nacional (Câmara e Senado).
+           Cite os temas e setores centrais (ex.: geração de emprego, direitos sociais e trabalhistas, saúde pública, crédito acessível, infraestrutura ou mobilidade).
+
+        3. TRADUÇÃO DIRETA PARA O POVO:
+           Explique em linguagem simples e acolhedora, sem juridiquês: o que muda na prática para o trabalhador, para a dona de casa, para os motoristas e aposentados? Quais são os benefícios, direitos garantidos ou prazos que passam a valer?
+
+        4. ENCERRAMENTO COM ASSINATURA DA RÁDIO:
+           "Fique sempre bem informado com a gente. Informação com verdade, clareza e respeito ao cidadão, aqui na sua Rádio Voz do Povo!"
+
+        REGRAS OBRIGATÓRIAS:
+        - NÃO utilize marcações de estúdio como [Locutor], [Música], [Trilha], [Pausa] ou cabeçalhos.
+        - Escreva APENAS o texto falado de forma contínua, natural e fluida.
+        - Não use asteriscos nem formatações markdown.
+        - Desenvolva o texto de forma completa e substancial (mínimo de 170 palavras e máximo de 240 palavras).
+
+        Dados governamentais oficiais:
+        ${JSON.stringify(topItems, null, 2)}
+      `;
+    } else if (isWeather) {
       console.log(`[generate-episode] Consultando Open-Meteo para as 27 capitais...`);
       const weatherData = await fetchOpenMeteoBrazilWeather();
       topItems = weatherData.capitais;
       console.log(`[generate-episode] Dados Open-Meteo obtidos com sucesso para ${topItems.length} capitais.`);
 
       scriptPrompt = `
-        Você é o locutor e meteorologista de rádio de uma prestigiada emissora nacional.
-        Escreva o roteiro de um boletim de previsão do tempo dinâmico, natural e envolvente (cerca de 1 minuto de fala, por volta de 150 a 220 palavras), cobrindo o clima em tempo real no Brasil com base nas coordenadas de todas as 27 capitais obtidas via API Open-Meteo.
+        Você é o locutor e meteorologista de rádio da nossa emissora nacional.
+        Escreva o roteiro de um giro meteorológico completo, dinâmico e natural (cerca de 130 a 180 palavras), cobrindo o clima em tempo real nas capitais brasileiras com base nos dados meteorológicos oficiais.
 
         Roteiro da locução:
-        1. Abertura com uma saudação calorosa aos ouvintes e anúncio do Giro Meteorológico Nacional das Capitais.
-        2. Destaque dos extremos meteorológicos:
-           - A capital que registra a maior temperatura: ${weatherData.summary.capitalMaisQuente}
-           - A capital com a menor temperatura: ${weatherData.summary.capitalMaisFria}
-           - Capitais com registro de chuva ou instabilidade: ${JSON.stringify(weatherData.summary.capitaisComChuvaOuInstabilidade)}
-        3. Um panorama ágil pelas regiões brasileiras destacando temperaturas e tempo predominante no Sudeste, Sul, Nordeste, Centro-Oeste e Norte.
-        4. Recomendações práticas aos ouvintes e encerramento com a assinatura da emissora.
+        1. Saudação acolhedora aos ouvintes e anúncio do Giro do Clima em tempo real nas capitais.
+        2. Destaque dos extremos do dia: a capital com maior temperatura (${weatherData.summary.capitalMaisQuente}), a mais fria (${weatherData.summary.capitalMaisFria}) e as regiões com chuva ou instabilidade (${JSON.stringify(weatherData.summary.capitaisComChuvaOuInstabilidade.slice(0, 5))}).
+        3. Dicas práticas para o ouvinte se programar ao longo do dia e encerramento com a assinatura da rádio.
 
         REGRAS OBRIGATÓRIAS:
-        - Não coloque marcações como [Locutor], [Música] ou notas de produção.
+        - Sem marcações como [Locutor] ou [Música].
         - Escreva APENAS o texto falado de forma contínua e fluida.
-        - Não use asteriscos nem formatações markdown.
+        - Não use formatações markdown nem asteriscos.
 
-        Dados oficiais em tempo real das 27 capitais:
+        Dados oficiais em tempo real:
         ${JSON.stringify(weatherData.summary, null, 2)}
       `;
     } else if (normalizedUrl.includes("artesp.sp.gov.br") || normalizedUrl.includes("artesp")) {
@@ -679,35 +877,36 @@ app.post('/api/generate-episode', async (req, res) => {
       topItems = ocorrencias; // Get all occurrences without slicing
     } else if (normalizedUrl.includes("news.google")) {
       let targetUrl = normalizedUrl;
-      // If it's a raw google news URL without RSS, default to top news.
-      // But if it ALREADY has 'rss' (like the search url), use it as is!
       if (!targetUrl.includes("rss")) {
         targetUrl = "https://news.google.com/rss?hl=pt-BR&gl=BR&ceid=BR:pt-419";
       }
-      
-      // Google News is extremely aggressive in blocking bot requests (503/403) from cloud IPs.
-      // We directly use feed2json to safely parse it without hitting their WAF or API limits.
       try {
-           const feed2jsonUrl = `https://feed2json.org/convert?url=${encodeURIComponent(targetUrl)}`;
-           const response = await fetch(feed2jsonUrl);
-           const data = await response.json();
-           
-           if (!data || !data.items) {
-              throw new Error("Feed2JSON failed to parse the RSS items.");
-           }
-           
-           topItems = data.items.map((item: any) => {
-              const titleParts = item.title?.split(' - ') || [];
-              const source = titleParts.length > 1 ? titleParts.pop() : 'Google News';
-              return {
-                  title: titleParts.join(' - ') || item.title,
-                  source: source,
-                  date: item.date_published
-              };
-           });
-      } catch (err: any) {
-           console.error("Feed2JSON proxy failed:", err);
-           throw new Error(`Serviço de leitura de notícias indisponível no momento (${err.message}). Tente novamente mais tarde.`);
+        const feed = await parser.parseURL(targetUrl);
+        topItems = (feed.items || []).slice(0, 5).map(item => ({
+          title: item.title,
+          contentSnippet: item.contentSnippet || item.content,
+        })).filter(item => item.title || item.contentSnippet);
+      } catch (directErr: any) {
+        try {
+          const feed2jsonUrl = `https://feed2json.org/convert?url=${encodeURIComponent(targetUrl)}`;
+          const response = await fetch(feed2jsonUrl, { signal: AbortSignal.timeout(6000) });
+          const data = await response.json();
+          if (!data || !data.items) {
+             throw new Error("Feed2JSON failed to parse the RSS items.");
+          }
+          topItems = (data.items || []).slice(0, 5).map((item: any) => {
+             const titleParts = item.title?.split(' - ') || [];
+             const source = titleParts.length > 1 ? titleParts.pop() : 'Google News';
+             return {
+                 title: titleParts.join(' - ') || item.title,
+                 source: source,
+                 date: item.date_published
+             };
+          });
+        } catch (proxyErr: any) {
+          console.error("Google News fetch failed:", proxyErr);
+          throw new Error(`Serviço de notícias indisponível no momento. Tente novamente mais tarde.`);
+        }
       }
     } else {
       try {
@@ -724,7 +923,7 @@ app.post('/api/generate-episode', async (req, res) => {
       }
     }
 
-    if (!isWeather && (!topItems || topItems.length === 0)) {
+    if (!isWeather && !isGovNews && (!topItems || (Array.isArray(topItems) && topItems.length === 0))) {
       return res.status(400).json({
         error: "Nenhuma notícia ou ocorrência encontrada nesta fonte para compor o episódio."
       });
@@ -737,20 +936,22 @@ app.post('/api/generate-episode', async (req, res) => {
     }
 
     // Limiting to 5 for general RSS feeds to avoid massive payloads
-    if (!isWeather) {
+    if (!isWeather && !isGovNews && Array.isArray(topItems)) {
       topItems = topItems.slice(0, 5);
     }
 
     // 2. Curate & Script with Gemini (if not weather, use generic news prompt)
     if (!scriptPrompt) {
       scriptPrompt = `
-        Você é um produtor e locutor de rádio de notícias (com um tom jornalístico, natural e dinâmico).
-        Baseado nos seguintes itens de notícias ou ocorrências obtidas da fonte, escreva um roteiro de rádio conciso (cerca de 1 a 2 minutos de fala).
-        Sintetize as principais informações de forma coesa e interessante.
-        Não inclua marcações de palco como [Música] ou [Locutor]. 
-        Escreva APENAS o que o locutor deve falar, de forma fluida.
-        Apresente-se como o host da nossa rádio automatizada, comece saudando os ouvintes, traga os destaques das notícias e encerre a transmissão.
+        Você é um experiente locutor e produtor de rádio de notícias com tom ágil, dinâmico e envolvente.
+        Baseado nos itens da fonte anexada, escreva um boletim de notícias completo e bem estruturado (cerca de 140 a 200 palavras, em torno de 1 minuto de locução fluida).
+        Apresente as informações e fatos mais relevantes em linguagem radiofônica clara e cativante. Comece saudando os ouvintes, desenvolva os principais destaques e encerre com a assinatura da emissora.
         
+        REGRAS OBRIGATÓRIAS:
+        - Sem marcações de palco como [Locutor], [Música] ou [Vinheta].
+        - Escreva APENAS o texto contínuo e fluido que será falado ao microfone.
+        - Sem formatação markdown ou asteriscos.
+
         Dados da Fonte:
         ${JSON.stringify(topItems, null, 2)}
       `;
@@ -763,19 +964,13 @@ app.post('/api/generate-episode', async (req, res) => {
     
     const scriptText = scriptResponse.text?.trim() || "";
 
-    // Começamos a enviar cabeçalhos e espaços em branco para manter a conexão ativa (evitar timeout do Nginx/Browser)
-    res.setHeader('Content-Type', 'application/json');
-    keepAliveInterval = setInterval(() => {
-      res.write(' ');
-    }, 15000);
-
     // 3. Generate TTS with Gemini
-    // Divide o texto em blocos menores para não estourar o limite da API de TTS e processar aos poucos
+    // Divide o texto em blocos de até 550 caracteres e sintetiza em paralelo
     const sentences = scriptText.match(/[^.!?]+[.!?]+/g) || [scriptText];
     let chunks: string[] = [];
     let currentChunk = "";
     for (const sentence of sentences) {
-       if (currentChunk.length + sentence.length > 600) {
+       if (currentChunk.length + sentence.length > 550) {
            if (currentChunk) chunks.push(currentChunk.trim());
            currentChunk = sentence;
        } else {
@@ -784,47 +979,39 @@ app.post('/api/generate-episode', async (req, res) => {
     }
     if (currentChunk.trim().length > 0) chunks.push(currentChunk.trim());
 
-    console.log(`[generate-episode] Roteiro pronto (${scriptText.length} caracteres). Chunks para TTS: ${chunks.length}`);
+    console.log(`[generate-episode] Roteiro pronto (${scriptText.length} caracteres, ~${scriptText.split(/\s+/).length} palavras). Chunks TTS: ${chunks.length}`);
 
-    let allPcmData: Buffer[] = [];
-    
-    for (let cIdx = 0; cIdx < chunks.length; cIdx++) {
-       const chunk = chunks[cIdx];
-       if (!chunk) continue;
-       console.log(`[generate-episode] Sintetizando TTS chunk ${cIdx + 1}/${chunks.length} (${chunk.length} chars)...`);
-       try {
-           const ttsResponse = await withRetry(() => ai.models.generateContent({
-             model: "gemini-3.1-flash-tts-preview",
-             contents: [{ parts: [{ text: chunk }] }],
-             config: {
-               responseModalities: [Modality.AUDIO],
-               speechConfig: {
-                   voiceConfig: {
-                     prebuiltVoiceConfig: { voiceName: 'Zephyr' },
-                   },
-               },
-             },
-           }));
+    // Executa os blocos de TTS em paralelo para máxima velocidade
+    const ttsResults = await Promise.all(
+      chunks.map(async (chunk, cIdx) => {
+        if (!chunk.trim()) return null;
+        try {
+          const ttsResponse = await withRetry(() => ai.models.generateContent({
+            model: "gemini-3.1-flash-tts-preview",
+            contents: [{ parts: [{ text: chunk }] }],
+            config: {
+              responseModalities: [Modality.AUDIO],
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: { voiceName: 'Zephyr' },
+                },
+              },
+            },
+          }));
+          const base64Audio = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+          return base64Audio ? Buffer.from(base64Audio, 'base64') : null;
+        } catch (ttsErr: any) {
+          console.error(`[generate-episode] Falha no chunk ${cIdx + 1}:`, ttsErr.message);
+          if (ttsErr.isQuotaError) throw ttsErr;
+          return null;
+        }
+      })
+    );
 
-           const base64Audio = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-           if (base64Audio) {
-               allPcmData.push(Buffer.from(base64Audio, 'base64'));
-               console.log(`[generate-episode] Chunk ${cIdx + 1} TTS sintetizado com sucesso.`);
-           }
-       } catch (ttsErr: any) {
-           console.error("Aviso: Falha ao gerar um bloco de TTS:", ttsErr.message);
-           if (ttsErr.isQuotaError) {
-             throw ttsErr;
-           }
-       }
-    }
-
-    clearInterval(keepAliveInterval);
+    const allPcmData: Buffer[] = ttsResults.filter((b): b is Buffer => b !== null);
 
     if (allPcmData.length === 0) {
-      res.write(JSON.stringify({ error: "Falha geral ao gerar o áudio" }));
-      res.end();
-      return;
+      return res.status(500).json({ error: "Falha ao gerar o áudio da locução." });
     }
 
     // Convert PCM chunks to a single WAV
@@ -855,7 +1042,17 @@ app.post('/api/generate-episode', async (req, res) => {
     if (formattedTitle.includes('/')) {
         formattedTitle = formattedTitle.split('/')[0];
     }
-    if (normalizedUrl.includes('mudanças+climáticas') || normalizedUrl.includes('mudancas+climaticas')) {
+    if (isVozDoPovo) {
+       formattedTitle = 'Rádio Voz do Povo: Leis e Ações Aprovadas';
+    } else if (isCongresso) {
+       formattedTitle = 'Congresso Nacional: Últimas Leis Publicadas (DOU)';
+    } else if (isCamara) {
+       formattedTitle = 'Câmara dos Deputados: Votações e Projetos';
+    } else if (isSenado) {
+       formattedTitle = 'Senado Federal: Matérias e Deliberações';
+    } else if (isAgenciaBrasil) {
+       formattedTitle = 'Agência Brasil: Política e Governo Federal';
+    } else if (normalizedUrl.includes('mudanças+climáticas') || normalizedUrl.includes('mudancas+climaticas')) {
        formattedTitle = 'Google Notícias: Mudanças Climáticas';
     } else if (normalizedUrl.includes('artesp')) {
        formattedTitle = 'Artesp - Rodovias SP';
@@ -877,8 +1074,7 @@ app.post('/api/generate-episode', async (req, res) => {
     episodes.unshift(newEpisode); // add to top
     saveEpisodes(episodes);
     
-    res.write(JSON.stringify(newEpisode));
-    res.end();
+    return res.json(newEpisode);
 
   } catch (error: any) {
     if (keepAliveInterval) {
@@ -889,13 +1085,10 @@ app.post('/api/generate-episode', async (req, res) => {
     const isQuota = error.isQuotaError;
     const errPayload = isQuota 
         ? { error: "QUOTA_EXCEEDED", message: "Limite de saldo excedido na API do Gemini." }
-        : { error: error.message || "Unknown error" };
+        : { error: error.message || "Falha ao processar e gerar episódio." };
 
     if (!res.headersSent) {
       res.status(isQuota ? 429 : 500).json(errPayload);
-    } else {
-      res.write(JSON.stringify(errPayload));
-      res.end();
     }
   }
 });
