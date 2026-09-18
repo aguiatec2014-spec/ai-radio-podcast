@@ -212,13 +212,28 @@ function decodeWmoWeatherCode(code: number): string {
   return "Instável";
 }
 
+let cachedWeatherData: any = null;
+let lastWeatherFetchTime: number = 0;
+const WEATHER_CACHE_TTL = 15 * 60 * 1000; // 15 minutes
+
 async function fetchOpenMeteoBrazilWeather() {
+  const now = Date.now();
+  if (cachedWeatherData && (now - lastWeatherFetchTime < WEATHER_CACHE_TTL)) {
+    console.log("[Open-Meteo] Retornando dados do cache (cache fresh).");
+    return cachedWeatherData;
+  }
+
   const lats = BRAZIL_CAPITALS.map(c => c.lat).join(",");
   const lons = BRAZIL_CAPITALS.map(c => c.lon).join(",");
   const url = `https://api.open-meteo.com/v1/forecast?latitude=${lats}&longitude=${lons}&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m&timezone=America%2FSao_Paulo`;
 
+  console.log("[Open-Meteo] Buscando novos dados da API...");
   const response = await fetch(url);
   if (!response.ok) {
+    if (response.status === 429 && cachedWeatherData) {
+       console.warn("[Open-Meteo] Recebido 429, mas temos cache (mesmo expirado). Usando cache de emergência.");
+       return cachedWeatherData;
+    }
     throw new Error(`Erro ao consultar API Open-Meteo: Status ${response.status}`);
   }
   const data = await response.json();
@@ -253,7 +268,7 @@ async function fetchOpenMeteoBrazilWeather() {
     "Norte": capitalWeather.filter(c => c.regiao === "Norte")
   };
 
-  return {
+  cachedWeatherData = {
     capitais: capitalWeather,
     summary: {
       totalCapitais: 27,
@@ -263,6 +278,9 @@ async function fetchOpenMeteoBrazilWeather() {
       panoramaPorRegioes: regioes
     }
   };
+  
+  lastWeatherFetchTime = now;
+  return cachedWeatherData;
 }
 
 // API Routes
