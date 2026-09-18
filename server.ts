@@ -495,14 +495,23 @@ app.get('/api/episodes', (req, res) => {
 
 app.post('/api/generate-time', async (req, res) => {
   try {
-    const { timeString } = req.body;
-    if (!timeString) {
-      return res.status(400).json({ error: "timeString is required" });
+    let { timeString } = req.body;
+    if (!timeString || typeof timeString !== 'string') {
+      const now = new Date();
+      const hours = now.getHours();
+      const minutes = now.getMinutes();
+      const hourLabel = hours === 1 ? 'hora' : 'horas';
+      const minuteLabel = minutes < 10 ? 'minuto' : 'minutos';
+      timeString = `${hours} ${hourLabel} e ${minutes} ${minuteLabel}`;
     }
 
-    const textPart1 = `São ${timeString}...`;
+    const trimmedTime = timeString.trim();
+    const isSingularHour = /^1\s*hora\b/i.test(trimmedTime);
+    const prefix = isSingularHour ? 'É' : 'São';
+
+    const textPart1 = `${prefix} ${trimmedTime}...`;
     const textPart2 = `repita...`;
-    const textPart3 = `${timeString}.`;
+    const textPart3 = `${trimmedTime}.`;
 
     // 1. Male voice
     const tts1 = await withRetry(() => ai.models.generateContent({

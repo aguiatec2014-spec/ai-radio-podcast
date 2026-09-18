@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
-import { PlayCircle, Plus, Rss, Radio, Podcast, Loader2, Link2, ListPlus, Pause, SkipForward, Play, X, Zap, Download, Share2, CloudSun, AlertCircle } from 'lucide-react';
+import { PlayCircle, Plus, Rss, Radio, Podcast, Loader2, Link2, ListPlus, Pause, SkipForward, Play, X, Zap, Download, Share2, CloudSun, AlertCircle, Clock } from 'lucide-react';
 
 interface Episode {
   id: string;
@@ -131,10 +131,79 @@ export default function App() {
     }
   };
 
+  const formatTimeString = (date: Date = new Date()): string => {
+    const hours = date.getHours();
+    const minutes = date.getMinutes();
+    const hourLabel = hours === 1 ? 'hora' : 'horas';
+    // Singular (<10): 'minuto', Plural (>9): 'minutos'
+    const minuteLabel = minutes < 10 ? 'minuto' : 'minutos';
+    return `${hours} ${hourLabel} e ${minutes} ${minuteLabel}`;
+  };
+
+  // Player controls
+  const playTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const startPlayEpisode = (index: number, episodesList: Episode[] = episodes) => {
+    if (playTimeoutRef.current) {
+      clearTimeout(playTimeoutRef.current);
+      playTimeoutRef.current = null;
+    }
+
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+    }
+
+    const targetEpisode = episodesList[index];
+    if (!targetEpisode) return;
+
+    setCurrentPlayingIndex(index);
+
+    if (audioRef.current) {
+      audioRef.current.src = targetEpisode.audioUrl;
+    }
+
+    const isTime = targetEpisode.title?.includes("Hora Certa");
+    playSyntheticTransition(isTime ? 'time-in' : 'in');
+
+    playTimeoutRef.current = setTimeout(() => {
+      if (audioRef.current) {
+        const playPromise = audioRef.current.play();
+        if (playPromise !== undefined) {
+          playPromise
+            .then(() => {
+              setIsPlaying(true);
+            })
+            .catch(e => {
+              if (e.name !== 'AbortError') {
+                console.error("Audio play failed:", e);
+              }
+            });
+        }
+      }
+    }, isTime ? 1200 : 600);
+  };
+
+  const handleNewEpisodeGenerated = (newEpisode: Episode) => {
+    // 1. Verifica se o player está parado ou pausado
+    const isAudioActivelyPlaying = isPlaying && audioRef.current && !audioRef.current.paused && !audioRef.current.ended;
+    const isPlayerStoppedOrPaused = !isAudioActivelyPlaying || currentPlayingIndex === null;
+
+    // 2. Atualiza a lista de episódios colocando o recém-gerado no topo
+    setEpisodes(prev => [newEpisode, ...prev]);
+
+    // 3. Se o player estiver parado ou pausado: tocar o primeiro áudio da lista (último gerado)
+    if (isPlayerStoppedOrPaused) {
+      startPlayEpisode(0, [newEpisode, ...episodes]);
+    } else {
+      // Se estiver tocando ativamente, mantém a reprodução atual sem reiniciar o áudio
+      setCurrentPlayingIndex(curr => (curr !== null ? curr + 1 : null));
+    }
+  };
+
   const generateTimeAnnouncement = async () => {
     try {
-      const now = new Date();
-      const timeString = `${now.getHours()} horas e ${now.getMinutes()} minutos`;
+      const timeString = formatTimeString();
       const res = await fetch('/api/generate-time', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -142,8 +211,7 @@ export default function App() {
       });
       const data = await res.json();
       if (res.ok && !data.error) {
-        setEpisodes(prev => [data, ...prev]);
-        setCurrentPlayingIndex(curr => curr !== null ? curr + 1 : 0);
+        handleNewEpisodeGenerated(data);
       }
     } catch (err) {
       console.error("Erro ao gerar anuncio de hora:", err);
@@ -189,8 +257,7 @@ export default function App() {
         });
         const data = await res.json();
         if (res.ok && !data.error) {
-          setEpisodes(prev => [data, ...prev]);
-          setCurrentPlayingIndex(curr => curr !== null ? curr + 1 : 0);
+          handleNewEpisodeGenerated(data);
           
           genCount++;
           if (genCount % 3 === 0) {
@@ -230,8 +297,7 @@ export default function App() {
       });
       const data = await res.json();
       if (res.ok && !data.error) {
-        setEpisodes(prev => [data, ...prev]);
-        setCurrentPlayingIndex(curr => curr !== null ? curr + 1 : 0);
+        handleNewEpisodeGenerated(data);
         
         const newCount = episodesGenerated + 1;
         setEpisodesGenerated(newCount);
@@ -253,53 +319,13 @@ export default function App() {
     }
   };
 
-  // Player controls
-  const playTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-
   useEffect(() => {
-    // Stop current playback and clear existing timeout when index changes
-    if (playTimeoutRef.current) {
-      clearTimeout(playTimeoutRef.current);
-    }
-    
-    if (audioRef.current) {
-      audioRef.current.pause();
-      // Important: resetting the time ensures a fresh start
-      audioRef.current.currentTime = 0;
-    }
-
-    if (currentPlayingIndex !== null && audioRef.current) {
-      const currentEpisode = episodes[currentPlayingIndex];
-      const isTime = currentEpisode?.title?.includes("Hora Certa");
-      
-      playSyntheticTransition(isTime ? 'time-in' : 'in');
-      
-      // Delay to let transition play
-      playTimeoutRef.current = setTimeout(() => {
-         if (audioRef.current) {
-            const playPromise = audioRef.current.play();
-            if (playPromise !== undefined) {
-              playPromise
-                .then(() => {
-                  setIsPlaying(true);
-                })
-                .catch(e => {
-                  // We ignore AbortError as it's expected when src changes rapidly
-                  if (e.name !== 'AbortError') {
-                    console.error("Audio play failed:", e);
-                  }
-                });
-            }
-         }
-      }, isTime ? 1200 : 600);
-    }
-
     return () => {
       if (playTimeoutRef.current) {
         clearTimeout(playTimeoutRef.current);
       }
     };
-  }, [currentPlayingIndex]);
+  }, []);
 
   const togglePlay = () => {
     if (!audioRef.current) return;
@@ -307,13 +333,17 @@ export default function App() {
       audioRef.current.pause();
       setIsPlaying(false);
     } else {
-      const playPromise = audioRef.current.play();
-      if (playPromise !== undefined) {
-        playPromise
-          .then(() => setIsPlaying(true))
-          .catch(e => {
-            if (e.name !== 'AbortError') console.error(e);
-          });
+      if (currentPlayingIndex === null && episodes.length > 0) {
+        startPlayEpisode(0);
+      } else {
+        const playPromise = audioRef.current.play();
+        if (playPromise !== undefined) {
+          playPromise
+            .then(() => setIsPlaying(true))
+            .catch(e => {
+              if (e.name !== 'AbortError') console.error(e);
+            });
+        }
       }
     }
   };
@@ -324,10 +354,10 @@ export default function App() {
     
     playSyntheticTransition(isTime ? 'time-out' : 'out');
     
-    // Play next episode in the list (older episodes since index 0 is newest)
+    // Toca o próximo episódio da lista (episódios mais antigos, pois o índice 0 é o mais recente)
     setTimeout(() => {
       if (currentPlayingIndex !== null && currentPlayingIndex < episodes.length - 1) {
-        setCurrentPlayingIndex(currentPlayingIndex + 1);
+        startPlayEpisode(currentPlayingIndex + 1);
       } else {
         setIsPlaying(false);
         setCurrentPlayingIndex(null);
@@ -336,7 +366,11 @@ export default function App() {
   };
 
   const playEpisode = (index: number) => {
-    setCurrentPlayingIndex(index);
+    if (currentPlayingIndex === index) {
+      togglePlay();
+    } else {
+      startPlayEpisode(index);
+    }
   };
 
   const handleDownload = async (ep: Episode, e?: React.MouseEvent) => {
@@ -574,15 +608,26 @@ export default function App() {
 
           {/* Dashboard Right Column */}
           <div className="md:col-span-7 space-y-6">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <h2 className="text-lg font-semibold flex items-center gap-2">
                 <PlayCircle className="w-5 h-5 text-neutral-500" />
                 Playlist de Transmissão
               </h2>
-              <span className="text-xs font-medium px-2 py-1 bg-green-100 text-green-700 rounded-full flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>
-                Autoplay Ativo
-              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={generateTimeAnnouncement}
+                  disabled={isGenerating}
+                  className="text-xs font-medium px-2.5 py-1.5 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 border border-neutral-200 rounded-lg flex items-center gap-1.5 transition-colors disabled:opacity-50"
+                  title="Gerar áudio de Hora Certa com formatação correta de minutos"
+                >
+                  <Clock className="w-3.5 h-3.5 text-neutral-600" />
+                  <span>Anunciar Hora Certa</span>
+                </button>
+                <span className="text-xs font-medium px-2 py-1 bg-green-100 text-green-700 rounded-full flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>
+                  Autoplay Ativo
+                </span>
+              </div>
             </div>
 
             {episodes.length === 0 ? (
